@@ -15,13 +15,15 @@ public:
     /// @param stream Pointer to the Stream object (e.g. &Serial).
     /// @param baud Baud rate.
     /// @param serverId Modbus server ID.
+    /// @param txEnablePin Pin used for TX Enable.
+    /// @param txEnableActiveHigh TX enmable is high.
     /// @param numCoils Number of coils.
     /// @param numHoldingRegisters Number of holding registers.
     /// @param numDiscreteInputs Number of discrete inputs (for FC 0x02). Default 0.
     /// @param numInputRegisters Number of input registers (for FC 0x04). Default 0.
     void begin(Stream* stream, uint32_t baud, uint8_t serverId,
-                int16_t txEnablePin = -1, bool txEnableActiveHigh = true,
-                size_t numCoils = 0, size_t numHoldingRegisters = 0,
+                int16_t txEnablePin, bool txEnableActiveHigh,
+                size_t numCoils, size_t numHoldingRegisters,
                 size_t numDiscreteInputs = 0, size_t numInputRegisters = 0);
 
     void update();
