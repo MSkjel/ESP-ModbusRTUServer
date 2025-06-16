@@ -20,9 +20,9 @@ public:
     /// @param numDiscreteInputs Number of discrete inputs (for FC 0x02). Default 0.
     /// @param numInputRegisters Number of input registers (for FC 0x04). Default 0.
     void begin(Stream* stream, uint32_t baud, uint8_t serverId,
+                int16_t txEnablePin = -1, bool txEnableActiveHigh = true,
                 size_t numCoils = 0, size_t numHoldingRegisters = 0,
-                size_t numDiscreteInputs = 0, size_t numInputRegisters = 0,
-                int16_t txEnablePin = -1, bool txEnableActiveHigh = true);
+                size_t numDiscreteInputs = 0, size_t numInputRegisters = 0);
 
     void update();
 

@@ -76,8 +76,9 @@ ModbusRTUServer::~ModbusRTUServer() {
 }
 
 void ModbusRTUServer::begin(Stream* stream, uint32_t baud, uint8_t serverId,
+                            int16_t txEnablePin, bool txEnableActiveHigh,
                             size_t numCoils, size_t numHoldingRegisters,
-                            size_t numDiscreteInputs, size_t numInputRegisters, int16_t txEnablePin, bool txEnableActiveHigh) {
+                            size_t numDiscreteInputs, size_t numInputRegisters) {
     stream_ = stream;
     baud_ = baud;
     serverId_ = serverId;
