@@ -4,6 +4,8 @@
 #include <Arduino.h>
 #include <functional>
 
+#define MODBUS_TX_ENABLE_DELAY_US 1000
+
 class ModbusRTUServer {
 public:
     ModbusRTUServer();
@@ -19,7 +21,8 @@ public:
     /// @param numInputRegisters Number of input registers (for FC 0x04). Default 0.
     void begin(Stream* stream, uint32_t baud, uint8_t serverId,
                 size_t numCoils = 0, size_t numHoldingRegisters = 0,
-                size_t numDiscreteInputs = 0, size_t numInputRegisters = 0);
+                size_t numDiscreteInputs = 0, size_t numInputRegisters = 0,
+                int16_t txEnablePin = -1, bool txEnableActiveHigh = true);
 
     void update();
 
@@ -122,6 +125,8 @@ private:
     size_t numHoldingRegisters_;
     size_t numDiscreteInputs_;
     size_t numInputRegisters_;
+    uint16_t txEnablePin_;
+    bool txEnableActiveHigh_;
 
     static const size_t BUFFER_SIZE = 256;
     uint8_t buffer_[BUFFER_SIZE];

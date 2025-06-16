@@ -77,7 +77,7 @@ ModbusRTUServer::~ModbusRTUServer() {
 
 void ModbusRTUServer::begin(Stream* stream, uint32_t baud, uint8_t serverId,
                             size_t numCoils, size_t numHoldingRegisters,
-                            size_t numDiscreteInputs, size_t numInputRegisters) {
+                            size_t numDiscreteInputs, size_t numInputRegisters, int16_t txEnablePin, bool txEnableActiveHigh) {
     stream_ = stream;
     baud_ = baud;
     serverId_ = serverId;
@@ -85,6 +85,13 @@ void ModbusRTUServer::begin(Stream* stream, uint32_t baud, uint8_t serverId,
     numHoldingRegisters_ = numHoldingRegisters;
     numDiscreteInputs_ = numDiscreteInputs;
     numInputRegisters_ = numInputRegisters;
+    txEnablePin_ = txEnablePin;
+    txEnableActiveHigh_ = txEnableActiveHigh;
+
+    if (txEnablePin_ >= 0) {
+        pinMode(txEnablePin_, OUTPUT);
+        digitalWrite(txEnablePin_, txEnableActiveHigh_ ? LOW : HIGH);
+    }
 
     #if !defined(MODBUS_DISABLE_READ_COILS)
     onReadCoils = [this](uint8_t* data, size_t length, bool broadcast) {
@@ -251,7 +258,20 @@ void ModbusRTUServer::sendResponse(uint8_t* data, size_t length, bool broadcast)
     data[length] = crc & 0xFF;
     data[length + 1] = (crc >> 8) & 0xFF;
 
+    if (txEnablePin_ >= 0)
+    {
+        digitalWrite(txEnablePin_, txEnableActiveHigh_ ? HIGH : LOW);
+        delayMicroseconds(MODBUS_TX_ENABLE_DELAY_US);
+    }
+
     stream_->write(data, length + 2);
+    stream_->flush();
+
+    if (txEnablePin_ >= 0)
+    {
+        delayMicroseconds(MODBUS_TX_ENABLE_DELAY_US);
+        digitalWrite(txEnablePin_, txEnableActiveHigh_ ? LOW : HIGH);
+    }
 }
 
 void ModbusRTUServer::sendException(uint8_t function, uint8_t exceptionCode, bool broadcast) {
