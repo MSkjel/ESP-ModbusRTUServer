@@ -262,7 +262,11 @@ void ModbusRTUServer::sendResponse(uint8_t* data, size_t length, bool broadcast)
     if (txEnablePin_ >= 0)
     {
         digitalWrite(txEnablePin_, txEnableActiveHigh_ ? HIGH : LOW);
+        # if !defined(ESP32)
         delayMicroseconds(MODBUS_TX_ENABLE_DELAY_US);
+        #else
+        taskYIELD();
+        #endif
     }
 
     stream_->write(data, length + 2);
@@ -270,7 +274,6 @@ void ModbusRTUServer::sendResponse(uint8_t* data, size_t length, bool broadcast)
 
     if (txEnablePin_ >= 0)
     {
-        delayMicroseconds(MODBUS_TX_ENABLE_DELAY_US);
         digitalWrite(txEnablePin_, txEnableActiveHigh_ ? LOW : HIGH);
     }
 }
