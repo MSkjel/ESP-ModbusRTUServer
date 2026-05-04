@@ -206,8 +206,11 @@ void ModbusRTUServer::update() {
             bufferIndex_ = 0;
         }
     }
+    
+    uint32_t timeout = interFrameTimeout_ > 0 ? interFrameTimeout_
+                                               : (11 * 1000000UL / baud_);
 
-    if (bufferIndex_ > 0 && (micros() - lastByteTime_) >= interFrameTimeout_) {
+    if (bufferIndex_ > 0 && (micros() - lastByteTime_) >= timeout) {
         processRequest(buffer_, bufferIndex_);
         bufferIndex_ = 0;
     }
