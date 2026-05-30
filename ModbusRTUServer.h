@@ -49,6 +49,13 @@ public:
     // ------------------------------------------------------------------
     using CallbackType = std::function<void(uint8_t* data, size_t length, bool broadcast)>;
 
+    // Optional custom framing. When set, update() hands the whole accumulated RX
+    // buffer to this callback instead of delimiting by interframe timeout. The
+    // callback extracts what complete frames it can (e.g. via checkCrc() +
+    // processFrame()) and returns how many bytes it consumed; update() keeps the
+    // rest for next time. Useful for buses that ignore Modbus interframe timing.
+    using BufferHandlerType = std::function<size_t(uint8_t* data, size_t length)>;
+
     #if !defined(MODBUS_DISABLE_READ_COILS)
     CallbackType onReadCoils;
     #endif
@@ -91,10 +98,20 @@ public:
 
     CallbackType onInvalidServer;
 
+    BufferHandlerType onRawBuffer;
+
     void sendResponse(uint8_t* data, size_t length, bool broadcast);
     void sendException(uint8_t function, uint8_t exceptionCode, bool broadcast);
     void setInterframeTimeout(uint32_t timeout);
     void setServerId(uint8_t serverId);
+
+    // Returns true if the trailing CRC-16 of the given frame is valid. Useful for
+    // an onRawBuffer handler that needs to detect frame boundaries by CRC.
+    bool checkCrc(uint8_t* data, size_t length);
+
+    // Validate and dispatch a single, already-delimited frame (CRC, server-id and
+    // function-code routing). Intended to be called from an onRawBuffer handler.
+    void processFrame(uint8_t* data, size_t length);
 
     // ------------------------------------------------------------------
     // Public Accessors for Data
@@ -130,7 +147,7 @@ private:
     uint16_t txEnablePin_;
     bool txEnableActiveHigh_;
 
-    static const size_t BUFFER_SIZE = 256;
+    static const size_t BUFFER_SIZE = 512;
     uint8_t buffer_[BUFFER_SIZE];
     size_t bufferIndex_;
     unsigned long lastByteTime_;
