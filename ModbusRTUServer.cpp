@@ -1,4 +1,5 @@
 #include "ModbusRTUServer.h"
+#include <string.h>
 
 const uint16_t PROGMEM ModbusRTUServer::crcTable_[256] = {
     0x0000, 0xC0C1, 0xC181, 0x0140, 0xC301, 0x03C0, 0x0280, 0xC241,
@@ -195,7 +196,7 @@ void ModbusRTUServer::begin(Stream* stream, uint32_t baud, uint8_t serverId,
 }
 
 void ModbusRTUServer::update() {
-    if (!stream_) 
+    if (!stream_)
         return;
 
     while (stream_->available() > 0) {
@@ -207,7 +208,28 @@ void ModbusRTUServer::update() {
         }
     }
 
-    if (bufferIndex_ > 0 && (micros() - lastByteTime_) >= interFrameTimeout_) {
+    if (bufferIndex_ == 0)
+        return;
+
+    // Custom framing: hand over the whole buffer each call and keep whatever it
+    // doesn't consume. Needed for buses that blast frames with no interframe gap.
+    if (onRawBuffer) {
+        size_t consumed = onRawBuffer(buffer_, bufferIndex_);
+
+        if (consumed >= bufferIndex_) {
+            bufferIndex_ = 0;
+        } else if (consumed > 0) {
+            memmove(buffer_, buffer_ + consumed, bufferIndex_ - consumed);
+            bufferIndex_ -= consumed;
+        } else if (bufferIndex_ >= BUFFER_SIZE) {
+            // Buffer full and nothing consumed: drop it so we don't wedge.
+            bufferIndex_ = 0;
+        }
+
+        return;
+    }
+
+    if ((micros() - lastByteTime_) >= interFrameTimeout_) {
         processRequest(buffer_, bufferIndex_);
         bufferIndex_ = 0;
     }
@@ -301,6 +323,17 @@ void ModbusRTUServer::setInterframeTimeout(uint32_t timeout) {
 
 void ModbusRTUServer::setServerId(uint8_t serverId) {
     serverId_ = serverId;
+}
+
+bool ModbusRTUServer::checkCrc(uint8_t* data, size_t length) {
+    if (length < 4)
+        return false;
+
+    return computeCrc(data, length) == 0;
+}
+
+void ModbusRTUServer::processFrame(uint8_t* data, size_t length) {
+    processRequest(data, length);
 }
 
 inline void ModbusRTUServer::processRequest(uint8_t* data, size_t length) {
