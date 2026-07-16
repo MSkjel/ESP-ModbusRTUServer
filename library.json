@@ -1,0 +1,34 @@
+{
+  "name": "ESP-ModbusRTUServer",
+  "version": "1.0.0",
+  "description": "Lightweight callback-driven Modbus RTU server library for the Arduino framework, with coils, holding/discrete/input registers, RS-485 TX-enable support and optional custom frame splitting.",
+  "keywords": [
+    "modbus",
+    "modbus-rtu",
+    "rs485",
+    "server",
+    "esp32",
+    "esp8266"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MSkjel/ESP-ModbusRTUServer.git"
+  },
+  "license": "MIT",
+  "authors": [
+    {
+      "name": "MSkjel",
+      "url": "https://github.com/MSkjel",
+      "maintainer": true
+    }
+  ],
+  "frameworks": "arduino",
+  "platforms": "*",
+  "headers": "ModbusRTUServer.h",
+  "export": {
+    "exclude": [
+      ".vscode",
+      ".gitignore"
+    ]
+  }
+}
