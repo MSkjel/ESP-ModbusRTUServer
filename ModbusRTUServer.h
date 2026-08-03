@@ -144,7 +144,7 @@ private:
     size_t numHoldingRegisters_;
     size_t numDiscreteInputs_;
     size_t numInputRegisters_;
-    uint16_t txEnablePin_;
+    int16_t txEnablePin_;
     bool txEnableActiveHigh_;
 
     static const size_t BUFFER_SIZE = 512;
