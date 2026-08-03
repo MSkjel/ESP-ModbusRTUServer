@@ -1,0 +1,63 @@
+name: Build
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        board: [esp32dev, d1_mini]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ matrix.board }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Generate test sketch
+        run: |
+          mkdir -p /tmp/sketch
+          cat > /tmp/sketch/main.cpp <<'EOF'
+          #include <Arduino.h>
+          #include <ModbusRTUServer.h>
+
+          ModbusRTUServer server;
+
+          void setup() {
+              Serial.begin(9600);
+              server.begin(&Serial, 9600, 1, -1, true, 16, 16, 16, 16);
+          }
+
+          void loop() {
+              server.update();
+          }
+          EOF
+
+      - name: Build
+        run: |
+          set -o pipefail
+          pio ci /tmp/sketch --lib="." --board=${{ matrix.board }} \
+            --project-option="build_flags = -Wall -Wextra" 2>&1 | tee build.log
+
+      - name: Fail on library warnings
+        run: |
+          if grep -E "ModbusRTUServer\.(h|cpp).*warning:" build.log; then
+            echo "::error::Compiler warnings found in library code"
+            exit 1
+          fi
