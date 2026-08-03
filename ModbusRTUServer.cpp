@@ -149,7 +149,7 @@ void ModbusRTUServer::begin(Stream* stream, uint32_t baud, uint8_t serverId,
     };
     #endif
 
-    onInvalidFunction = [this](uint8_t* data, size_t length, bool broadcast) {
+    onInvalidFunction = [this](uint8_t* data, size_t, bool broadcast) {
         sendException(data[1], 0x01, broadcast);
     };
 
@@ -454,13 +454,13 @@ void ModbusRTUServer::handleReadCoils(uint8_t* data, size_t length, bool broadca
     }
 
     switch (remaining) {
-        case 7: if (*coilPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++;
-        case 6: if (*coilPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++;
-        case 5: if (*coilPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++;
-        case 4: if (*coilPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++;
-        case 3: if (*coilPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++;
-        case 2: if (*coilPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++;
-        case 1: if (*coilPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++;
+        case 7: if (*coilPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
+        case 6: if (*coilPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
+        case 5: if (*coilPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
+        case 4: if (*coilPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
+        case 3: if (*coilPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
+        case 2: if (*coilPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
+        case 1: if (*coilPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
         case 0: break;
     }
 
@@ -509,13 +509,13 @@ void ModbusRTUServer::handleReadDiscreteInputs(uint8_t* data, size_t length, boo
     }
 
     switch (remaining) {
-        case 7: if (*inputPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++;
-        case 6: if (*inputPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++;
-        case 5: if (*inputPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++;
-        case 4: if (*inputPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++;
-        case 3: if (*inputPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++;
-        case 2: if (*inputPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++;
-        case 1: if (*inputPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++;
+        case 7: if (*inputPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
+        case 6: if (*inputPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
+        case 5: if (*inputPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
+        case 4: if (*inputPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
+        case 3: if (*inputPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
+        case 2: if (*inputPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
+        case 1: if (*inputPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
         case 0: break;
     }
 
@@ -542,7 +542,7 @@ void ModbusRTUServer::handleReadHoldingRegisters(uint8_t* data, size_t length, b
     response[1] = data[1];
     response[2] = byteCount;
 
-    if (3 + byteCount + 2 > BUFFER_SIZE) {
+    if ((size_t)(3 + byteCount + 2) > BUFFER_SIZE) {
         sendException(data[1], 0x03, broadcast);
         return;
     }
@@ -567,13 +567,13 @@ void ModbusRTUServer::handleReadHoldingRegisters(uint8_t* data, size_t length, b
     }
 
     switch (remaining) {
-        case 7: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF);
-        case 6: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF);
-        case 5: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF);
-        case 4: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF);
-        case 3: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF);
-        case 2: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF);
-        case 1: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF);
+        case 7: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
+        case 6: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
+        case 5: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
+        case 4: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
+        case 3: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
+        case 2: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
+        case 1: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
         case 0: break;
     }
 
@@ -620,13 +620,13 @@ void ModbusRTUServer::handleReadInputRegisters(uint8_t* data, size_t length, boo
     }
 
     switch (remaining) {
-        case 7: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF);
-        case 6: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF);
-        case 5: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF);
-        case 4: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF);
-        case 3: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF);
-        case 2: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF);
-        case 1: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF);
+        case 7: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
+        case 6: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
+        case 5: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
+        case 4: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
+        case 3: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
+        case 2: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
+        case 1: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
         case 0: break;
     }
 
@@ -635,7 +635,7 @@ void ModbusRTUServer::handleReadInputRegisters(uint8_t* data, size_t length, boo
 #endif
 
 #if !defined(MODBUS_DISABLE_REPORT_SERVER_ID)
-void ModbusRTUServer::handleReportServerID(uint8_t* data, size_t length, bool broadcast) {
+void ModbusRTUServer::handleReportServerID(uint8_t*, size_t, bool broadcast) {
     uint8_t response[7];
     response[0] = serverId_;
     response[1] = 0x11;
@@ -698,8 +698,8 @@ void ModbusRTUServer::handleWriteMultipleCoils(uint8_t* data, size_t length, boo
     uint8_t expectedByteCount = (quantity + 7) / 8;
 
     if (quantity < 1 || quantity > 0x07B0 ||
-        (startAddress + quantity) > numCoils_ || 
-        length < 7 + byteCount ||
+        (startAddress + quantity) > numCoils_ ||
+        length < (size_t)(7 + byteCount) ||
         byteCount != expectedByteCount) {
         sendException(data[1], 0x02, broadcast);
         return;
@@ -726,13 +726,13 @@ void ModbusRTUServer::handleWriteMultipleCoils(uint8_t* data, size_t length, boo
     }
 
     switch (remaining) {
-        case 7: *coilPtr++ = (dataPtr[i / 8] >> (i % 8)) & 0x01; i++;
-        case 6: *coilPtr++ = (dataPtr[i / 8] >> (i % 8)) & 0x01; i++;
-        case 5: *coilPtr++ = (dataPtr[i / 8] >> (i % 8)) & 0x01; i++;
-        case 4: *coilPtr++ = (dataPtr[i / 8] >> (i % 8)) & 0x01; i++;
-        case 3: *coilPtr++ = (dataPtr[i / 8] >> (i % 8)) & 0x01; i++;
-        case 2: *coilPtr++ = (dataPtr[i / 8] >> (i % 8)) & 0x01; i++;
-        case 1: *coilPtr++ = (dataPtr[i / 8] >> (i % 8)) & 0x01; i++;
+        case 7: *coilPtr++ = (dataPtr[i / 8] >> (i % 8)) & 0x01; i++; [[fallthrough]];
+        case 6: *coilPtr++ = (dataPtr[i / 8] >> (i % 8)) & 0x01; i++; [[fallthrough]];
+        case 5: *coilPtr++ = (dataPtr[i / 8] >> (i % 8)) & 0x01; i++; [[fallthrough]];
+        case 4: *coilPtr++ = (dataPtr[i / 8] >> (i % 8)) & 0x01; i++; [[fallthrough]];
+        case 3: *coilPtr++ = (dataPtr[i / 8] >> (i % 8)) & 0x01; i++; [[fallthrough]];
+        case 2: *coilPtr++ = (dataPtr[i / 8] >> (i % 8)) & 0x01; i++; [[fallthrough]];
+        case 1: *coilPtr++ = (dataPtr[i / 8] >> (i % 8)) & 0x01; i++; [[fallthrough]];
         case 0: break;
     }
 
@@ -752,7 +752,7 @@ void ModbusRTUServer::handleWriteMultipleRegisters(uint8_t* data, size_t length,
 
     if (quantity < 1 || quantity > 123 ||
         (startAddress + quantity) > numHoldingRegisters_ ||
-        length < 7 + byteCount ||
+        length < (size_t)(7 + byteCount) ||
         byteCount != expectedByteCount) {
         sendException(data[1], 0x02, broadcast);
         return;
@@ -778,13 +778,13 @@ void ModbusRTUServer::handleWriteMultipleRegisters(uint8_t* data, size_t length,
     }
 
     switch (remaining) {
-        case 7: *regPtr++ = (*dataPtr << 8) | *(dataPtr + 1); dataPtr += 2;
-        case 6: *regPtr++ = (*dataPtr << 8) | *(dataPtr + 1); dataPtr += 2;
-        case 5: *regPtr++ = (*dataPtr << 8) | *(dataPtr + 1); dataPtr += 2;
-        case 4: *regPtr++ = (*dataPtr << 8) | *(dataPtr + 1); dataPtr += 2;
-        case 3: *regPtr++ = (*dataPtr << 8) | *(dataPtr + 1); dataPtr += 2;
-        case 2: *regPtr++ = (*dataPtr << 8) | *(dataPtr + 1); dataPtr += 2;
-        case 1: *regPtr++ = (*dataPtr << 8) | *(dataPtr + 1); dataPtr += 2;
+        case 7: *regPtr++ = (*dataPtr << 8) | *(dataPtr + 1); dataPtr += 2; [[fallthrough]];
+        case 6: *regPtr++ = (*dataPtr << 8) | *(dataPtr + 1); dataPtr += 2; [[fallthrough]];
+        case 5: *regPtr++ = (*dataPtr << 8) | *(dataPtr + 1); dataPtr += 2; [[fallthrough]];
+        case 4: *regPtr++ = (*dataPtr << 8) | *(dataPtr + 1); dataPtr += 2; [[fallthrough]];
+        case 3: *regPtr++ = (*dataPtr << 8) | *(dataPtr + 1); dataPtr += 2; [[fallthrough]];
+        case 2: *regPtr++ = (*dataPtr << 8) | *(dataPtr + 1); dataPtr += 2; [[fallthrough]];
+        case 1: *regPtr++ = (*dataPtr << 8) | *(dataPtr + 1); dataPtr += 2; [[fallthrough]];
         case 0: break;
     }
 
