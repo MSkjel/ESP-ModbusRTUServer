@@ -105,6 +105,16 @@ public:
     void setInterframeTimeout(uint32_t timeout);
     void setServerId(uint8_t serverId);
 
+    // Some RS485 transceivers keep their receiver on while transmitting, so
+    // everything we send comes straight back in on RX. With the echo filter on,
+    // bytes that match what we just sent are held back, and dropped once the
+    // whole frame has come back. Anything else is passed on untouched. On by
+    // default.
+    void setEchoFilter(bool enabled);
+
+    // True once a frame we sent has come back to us.
+    bool echoDetected() const;
+
     // Returns true if the trailing CRC-16 of the given frame is valid. Useful for
     // an onRawBuffer handler that needs to detect frame boundaries by CRC.
     bool checkCrc(uint8_t* data, size_t length);
@@ -155,8 +165,28 @@ private:
 
     static const uint16_t crcTable_[256];
 
+    // Frames we sent and expect to see again if the transceiver echoes
+    static const size_t ECHO_SIZE = 256;
+    static const uint8_t ECHO_MAX_FRAMES = 4;
+    static const uint32_t ECHO_TIMEOUT_US = 50000;
+    uint8_t echo_[ECHO_SIZE];
+    size_t echoLength_;
+    size_t echoPos_;
+    size_t echoFrameStart_;
+    size_t echoFrameEnds_[ECHO_MAX_FRAMES];
+    uint8_t echoFrameCount_;
+    uint8_t echoFrameIndex_;
+    unsigned long echoTime_;
+    bool echoFilter_;
+    bool echoDetected_;
+
     uint16_t computeCrc(uint8_t* data, size_t length);
     void processRequest(uint8_t* data, size_t length);
+    void storeByte(uint8_t b);
+    void expectEcho(const uint8_t* data, size_t length);
+    bool filterEcho(uint8_t b);
+    void releaseEcho();
+    void clearEcho();
 
 protected:
     #if !defined(MODBUS_DISABLE_READ_COILS)
