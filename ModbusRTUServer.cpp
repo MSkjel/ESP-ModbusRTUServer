@@ -50,7 +50,15 @@ ModbusRTUServer::ModbusRTUServer()
         numInputRegisters_(0),
         bufferIndex_(0),
         lastByteTime_(0),
-        interFrameTimeout_(5)
+        interFrameTimeout_(5),
+        echoLength_(0),
+        echoPos_(0),
+        echoFrameStart_(0),
+        echoFrameCount_(0),
+        echoFrameIndex_(0),
+        echoTime_(0),
+        echoFilter_(true),
+        echoDetected_(false)
 {}
 
 ModbusRTUServer::~ModbusRTUServer() {
@@ -200,13 +208,20 @@ void ModbusRTUServer::update() {
         return;
 
     while (stream_->available() > 0) {
-        if (bufferIndex_ < BUFFER_SIZE) {
-            buffer_[bufferIndex_++] = stream_->read();
-            lastByteTime_ = micros();
-        } else {
-            bufferIndex_ = 0;
-        }
+        int b = stream_->read();
+        if (b < 0)
+            break;
+
+        lastByteTime_ = micros();
+
+        if (!filterEcho((uint8_t)b))
+            storeByte((uint8_t)b);
     }
+
+    // Our echo should be back long before this. If it isn't, the bytes we held
+    // back weren't an echo after all, so hand them on.
+    if (echoLength_ > 0 && (micros() - echoTime_) > ECHO_TIMEOUT_US + interFrameTimeout_)
+        releaseEcho();
 
     if (bufferIndex_ == 0)
         return;
@@ -298,23 +313,21 @@ void ModbusRTUServer::sendResponse(uint8_t* data, size_t length, bool broadcast)
     {
         digitalWrite(txEnablePin_, txEnableActiveHigh_ ? LOW : HIGH);
     }
+
+    expectEcho(data, length + 2);
 }
 
 void ModbusRTUServer::sendException(uint8_t function, uint8_t exceptionCode, bool broadcast) {
     if (broadcast)
         return;
 
+    // Through sendResponse, so it gets the CRC, the TX enable pin and the flush
     uint8_t response[5];
     response[0] = serverId_;
     response[1] = function | 0x80;
     response[2] = exceptionCode;
 
-    uint16_t crc = computeCrc(response, 3);
-
-    response[3] = crc & 0xFF;
-    response[4] = (crc >> 8) & 0xFF;
-
-    stream_->write(response, 5);
+    sendResponse(response, 3, broadcast);
 }
 
 void ModbusRTUServer::setInterframeTimeout(uint32_t timeout) {
@@ -323,6 +336,86 @@ void ModbusRTUServer::setInterframeTimeout(uint32_t timeout) {
 
 void ModbusRTUServer::setServerId(uint8_t serverId) {
     serverId_ = serverId;
+}
+
+void ModbusRTUServer::setEchoFilter(bool enabled) {
+    echoFilter_ = enabled;
+
+    if (!enabled)
+        releaseEcho();
+}
+
+bool ModbusRTUServer::echoDetected() const {
+    return echoDetected_;
+}
+
+void ModbusRTUServer::storeByte(uint8_t b) {
+    if (bufferIndex_ >= BUFFER_SIZE)
+        bufferIndex_ = 0;
+
+    buffer_[bufferIndex_++] = b;
+}
+
+void ModbusRTUServer::expectEcho(const uint8_t* data, size_t length) {
+    if (!echoFilter_ || length > ECHO_SIZE)
+        return;
+
+    // No room behind what we're already waiting for. Can only happen if we keep
+    // sending and nothing comes back, so that wasn't an echo anyway. Dropped rather
+    // than released, since this can run while an onRawBuffer handler is using the buffer.
+    if (echoFrameCount_ >= ECHO_MAX_FRAMES || echoLength_ + length > ECHO_SIZE)
+        clearEcho();
+
+    memcpy(echo_ + echoLength_, data, length);
+    echoLength_ += length;
+    echoFrameEnds_[echoFrameCount_++] = echoLength_;
+    echoTime_ = micros();
+}
+
+bool ModbusRTUServer::filterEcho(uint8_t b) {
+    if (echoPos_ >= echoLength_)
+        return false;
+
+    // Not our echo. Put back what we held, in order, and let this byte follow it.
+    if (b != echo_[echoPos_]) {
+        releaseEcho();
+        return false;
+    }
+
+    echoPos_++;
+    echoTime_ = micros();
+
+    if (echoPos_ == echoFrameEnds_[echoFrameIndex_]) {
+        // A whole frame came back, CRC and all, so drop it. Write single coil and
+        // write single register answers are identical to the request, so those
+        // could also be a master retrying.
+        uint8_t function = echo_[echoFrameStart_ + 1];
+        if (function != 0x05 && function != 0x06)
+            echoDetected_ = true;
+
+        echoFrameStart_ = echoPos_;
+        echoFrameIndex_++;
+
+        if (echoFrameIndex_ == echoFrameCount_)
+            clearEcho();
+    }
+
+    return true;
+}
+
+void ModbusRTUServer::releaseEcho() {
+    for (size_t i = echoFrameStart_; i < echoPos_; i++)
+        storeByte(echo_[i]);
+
+    clearEcho();
+}
+
+void ModbusRTUServer::clearEcho() {
+    echoLength_ = 0;
+    echoPos_ = 0;
+    echoFrameStart_ = 0;
+    echoFrameCount_ = 0;
+    echoFrameIndex_ = 0;
 }
 
 bool ModbusRTUServer::checkCrc(uint8_t* data, size_t length) {
