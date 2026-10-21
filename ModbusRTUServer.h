@@ -20,8 +20,7 @@ public:
     class Port {
     public:
         virtual ~Port() = default;
-        virtual int available() = 0;                                  ///< bytes waiting to be read
-        virtual int read() = 0;                                       ///< the next byte, or -1 if there's none
+        virtual size_t read(uint8_t* data, size_t max) = 0;           ///< what's waiting, up to max bytes, without waiting
         virtual size_t write(const uint8_t* data, size_t length) = 0;
         virtual void flush() = 0;                                     ///< returns once the last byte is sent
     };
@@ -174,8 +173,12 @@ private:
     class StreamPort : public Port {  // a Stream as a Port
     public:
         Stream* stream = nullptr;
-        int available() override { return stream->available(); }
-        int read() override { return stream->read(); }
+        size_t read(uint8_t* data, size_t max) override {
+            int n = stream->available();
+            if (n <= 0)
+                return 0;
+            return stream->readBytes(data, (size_t) n < max ? (size_t) n : max);
+        }
         size_t write(const uint8_t* data, size_t length) override { return stream->write(data, length); }
         void flush() override { stream->flush(); }
     };
@@ -217,6 +220,7 @@ private:
     uint16_t computeCrc(uint8_t* data, size_t length);
     void processRequest(uint8_t* data, size_t length);
     void storeByte(uint8_t b);
+    void handOver();
     void expectEcho(const uint8_t* data, size_t length);
     bool filterEcho(uint8_t b);
     void releaseEcho();

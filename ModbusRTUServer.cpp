@@ -263,15 +263,21 @@ void ModbusRTUServer::update() {
     if (!port_)
         return;
 
-    while (port_->available() > 0) {
-        int b = port_->read();
-        if (b < 0)
-            break;
-
+    // Never more than fits. With custom framing a full buffer goes to the handler for room, else the rest
+    // waits in the port.
+    uint8_t chunk[64];
+    size_t n;
+    while (bufferIndex_ < BUFFER_SIZE &&
+           (n = port_->read(chunk, std::min(sizeof chunk, BUFFER_SIZE - bufferIndex_))) > 0) {
         lastByteTime_ = nowUs();
 
-        if (!filterEcho((uint8_t)b))
-            storeByte((uint8_t)b);
+        for (size_t i = 0; i < n; i++) {
+            if (!filterEcho(chunk[i]))
+                storeByte(chunk[i]);
+        }
+
+        if (bufferIndex_ >= BUFFER_SIZE && onRawBuffer)
+            handOver();
     }
 
     // Our echo should be back long before this. If it isn't, the bytes we held
@@ -282,21 +288,8 @@ void ModbusRTUServer::update() {
     if (bufferIndex_ == 0)
         return;
 
-    // Custom framing: hand over the whole buffer each call and keep whatever it
-    // doesn't consume. Needed for buses that blast frames with no interframe gap.
     if (onRawBuffer) {
-        size_t consumed = onRawBuffer(buffer_, bufferIndex_);
-
-        if (consumed >= bufferIndex_) {
-            bufferIndex_ = 0;
-        } else if (consumed > 0) {
-            memmove(buffer_, buffer_ + consumed, bufferIndex_ - consumed);
-            bufferIndex_ -= consumed;
-        } else if (bufferIndex_ >= BUFFER_SIZE) {
-            // Buffer full and nothing consumed: drop it so we don't wedge.
-            bufferIndex_ = 0;
-        }
-
+        handOver();
         return;
     }
 
@@ -401,11 +394,26 @@ bool ModbusRTUServer::echoDetected() const {
     return echoDetected_;
 }
 
-void ModbusRTUServer::storeByte(uint8_t b) {
-    if (bufferIndex_ >= BUFFER_SIZE)
-        bufferIndex_ = 0;
+// Custom framing: hand over the whole buffer and keep whatever it doesn't
+// consume. Needed for buses that blast frames with no interframe gap.
+void ModbusRTUServer::handOver() {
+    size_t consumed = onRawBuffer(buffer_, bufferIndex_);
 
-    buffer_[bufferIndex_++] = b;
+    if (consumed >= bufferIndex_) {
+        bufferIndex_ = 0;
+    } else if (consumed > 0) {
+        memmove(buffer_, buffer_ + consumed, bufferIndex_ - consumed);
+        bufferIndex_ -= consumed;
+    } else if (bufferIndex_ >= BUFFER_SIZE) {
+        // Buffer full and nothing consumed: drop it so we don't wedge.
+        bufferIndex_ = 0;
+    }
+}
+
+// A full buffer drops the byte. Starting over would overwrite frames not handed on yet.
+void ModbusRTUServer::storeByte(uint8_t b) {
+    if (bufferIndex_ < BUFFER_SIZE)
+        buffer_[bufferIndex_++] = b;
 }
 
 void ModbusRTUServer::expectEcho(const uint8_t* data, size_t length) {

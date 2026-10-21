@@ -95,14 +95,9 @@ jobs:
 
           // the server on UART1 through ESP-IDF's driver
           struct UartPort : ModbusRTUServer::Port {
-              int available() override {
-                  size_t n = 0;
-                  uart_get_buffered_data_len(UART_NUM_1, &n);
-                  return (int) n;
-              }
-              int read() override {
-                  uint8_t b;
-                  return uart_read_bytes(UART_NUM_1, &b, 1, 0) == 1 ? b : -1;
+              size_t read(uint8_t* data, size_t max) override {
+                  int n = uart_read_bytes(UART_NUM_1, data, max, 0);
+                  return n > 0 ? (size_t) n : 0;
               }
               size_t write(const uint8_t* data, size_t length) override {
                   return (size_t) uart_write_bytes(UART_NUM_1, data, length);

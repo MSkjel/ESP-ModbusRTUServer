@@ -1,5 +1,5 @@
 // The library on a PC, without Arduino or ESP-IDF: requests in through a fake Port, answers out.
-//   g++ -std=c++17 -Wall -Wextra -Werror -I.. host_test.cpp ../ModbusRTUServer.cpp -o host_test && ./host_test
+//   g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I.. host_test.cpp ../ModbusRTUServer.cpp -o host_test && ./host_test
 #include <chrono>
 #include <cstdio>
 #include <deque>
@@ -19,13 +19,13 @@ static int fails;
 struct FakePort : ModbusRTUServer::Port {
     std::deque<uint8_t> in;
     std::vector<uint8_t> out;
-    int available() override { return (int) in.size(); }
-    int read() override {
-        if (in.empty())
-            return -1;
-        uint8_t b = in.front();
-        in.pop_front();
-        return b;
+    size_t read(uint8_t* data, size_t max) override {
+        size_t n = 0;
+        for (; n < max && !in.empty(); n++) {
+            data[n] = in.front();
+            in.pop_front();
+        }
+        return n;
     }
     size_t write(const uint8_t* data, size_t length) override {
         out.insert(out.end(), data, data + length);
@@ -97,6 +97,42 @@ int main() {
     CHECK(seen == 6);
     s.update();
     CHECK(seen == 2);
+
+    // more than one read's worth comes in at once
+    p.in.insert(p.in.end(), 98, 0x55);
+    s.update();
+    CHECK(seen == 100);
+
+    // A big frame half in, then more than the buffer holds after a stall. Frames are [length, number, data...]
+    // here, and the handler takes whole ones. None may go missing.
+    s.onRawBuffer = [](uint8_t*, size_t length) -> size_t { return length; };  // what's left from above
+    s.update();
+    std::vector<int> frames;
+    bool intact = true;
+    s.onRawBuffer = [&](uint8_t* data, size_t length) -> size_t {
+        size_t offset = 0;
+        while (offset < length && data[offset] >= 2 && offset + data[offset] <= length) {
+            for (size_t i = 2; i < data[offset]; i++)
+                intact &= data[offset + i] == data[offset + 1];
+            frames.push_back(data[offset + 1]);
+            offset += data[offset];
+        }
+        return offset;
+    };
+    std::vector<uint8_t> line;
+    for (int k = 0; k < 40; k++) {
+        uint8_t len = k == 3 ? 200 : 20;
+        line.push_back(len);
+        line.insert(line.end(), len - 1, (uint8_t) k);
+    }
+    p.in.insert(p.in.end(), line.begin(), line.begin() + 160);  // 3 frames and the start of the big one
+    s.update();
+    p.in.insert(p.in.end(), line.begin() + 160, line.end());  // 820 bytes at once
+    s.update();
+    bool inOrder = frames.size() == 40;
+    for (size_t k = 0; k < frames.size(); k++)
+        inOrder &= frames[k] == (int) k;
+    CHECK(inOrder && intact);
 
     printf("host test: %s\n", fails ? "FAILED" : "ok");
     return fails != 0;
