@@ -64,3 +64,87 @@ jobs:
             echo "::error::Compiler warnings found in library code"
             exit 1
           fi
+
+  espidf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-espidf
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Generate test program
+        run: |
+          mkdir -p /tmp/idf
+          cat > /tmp/idf/main.cpp <<'EOF'
+          #include "driver/uart.h"
+          #include "freertos/FreeRTOS.h"
+          #include "freertos/task.h"
+          #include <ModbusRTUServer.h>
+
+          // the server on UART1 through ESP-IDF's driver
+          struct UartPort : ModbusRTUServer::Port {
+              size_t read(uint8_t* data, size_t max) override {
+                  int n = uart_read_bytes(UART_NUM_1, data, max, 0);
+                  return n > 0 ? (size_t) n : 0;
+              }
+              size_t write(const uint8_t* data, size_t length) override {
+                  return (size_t) uart_write_bytes(UART_NUM_1, data, length);
+              }
+              void flush() override { uart_wait_tx_done(UART_NUM_1, portMAX_DELAY); }
+          };
+
+          static UartPort port;
+          static ModbusRTUServer server;
+
+          extern "C" void app_main() {
+              uart_config_t cfg = {};
+              cfg.baud_rate = 9600;
+              cfg.data_bits = UART_DATA_8_BITS;
+              cfg.parity = UART_PARITY_DISABLE;
+              cfg.stop_bits = UART_STOP_BITS_1;
+              cfg.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
+              uart_driver_install(UART_NUM_1, 512, 0, 0, nullptr, 0);
+              uart_param_config(UART_NUM_1, &cfg);
+              server.begin(&port, 9600, 1, 4, true, 16, 16, 16, 16);
+              while (true) {
+                  server.update();
+                  vTaskDelay(1);
+              }
+          }
+          EOF
+
+      - name: Build
+        run: |
+          set -o pipefail
+          pio ci /tmp/idf --lib="." --board=esp32dev --project-option="framework=espidf" \
+            --project-option="build_flags = -Wall -Wextra" 2>&1 | tee build.log
+
+      - name: Fail on library warnings
+        run: |
+          if grep -E "ModbusRTUServer\.(h|cpp).*warning:" build.log; then
+            echo "::error::Compiler warnings found in library code"
+            exit 1
+          fi
+
+  host:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test on CI
+        run: |
+          g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I. tests/host_test.cpp \
+            ModbusRTUServer.cpp -o host_test
+          ./host_test

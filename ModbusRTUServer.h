@@ -1,8 +1,12 @@
 #ifndef MODBUS_RTUSERVER_H
 #define MODBUS_RTUSERVER_H
 
-#include <Arduino.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <functional>
+#ifdef ARDUINO
+#include <Arduino.h>
+#endif
 
 #define MODBUS_TX_ENABLE_DELAY_US 1000
 
@@ -11,8 +15,18 @@ public:
     ModbusRTUServer();
     ~ModbusRTUServer();
 
+    /// The serial line the server talks on. On Arduino, begin() also takes any Stream (e.g. &Serial); elsewhere
+    /// (ESP-IDF, or a PC for tests) implement this for your UART.
+    class Port {
+    public:
+        virtual ~Port() = default;
+        virtual size_t read(uint8_t* data, size_t max) = 0;           ///< what's waiting, up to max bytes, without waiting
+        virtual size_t write(const uint8_t* data, size_t length) = 0;
+        virtual void flush() = 0;                                     ///< returns once the last byte is sent
+    };
+
     /// Initialize the Modbus server.
-    /// @param stream Pointer to the Stream object (e.g. &Serial).
+    /// @param port The serial line.
     /// @param baud Baud rate.
     /// @param serverId Modbus server ID.
     /// @param txEnablePin Pin used for TX Enable.
@@ -21,10 +35,18 @@ public:
     /// @param numHoldingRegisters Number of holding registers.
     /// @param numDiscreteInputs Number of discrete inputs (for FC 0x02). Default 0.
     /// @param numInputRegisters Number of input registers (for FC 0x04). Default 0.
+    void begin(Port* port, uint32_t baud, uint8_t serverId,
+                int16_t txEnablePin, bool txEnableActiveHigh,
+                size_t numCoils, size_t numHoldingRegisters,
+                size_t numDiscreteInputs = 0, size_t numInputRegisters = 0);
+
+#ifdef ARDUINO
+    /// The same on an Arduino Stream (e.g. &Serial)
     void begin(Stream* stream, uint32_t baud, uint8_t serverId,
                 int16_t txEnablePin, bool txEnableActiveHigh,
                 size_t numCoils, size_t numHoldingRegisters,
                 size_t numDiscreteInputs = 0, size_t numInputRegisters = 0);
+#endif
 
     void update();
 
@@ -147,7 +169,22 @@ public:
     #endif
 
 private:
-    Stream* stream_;
+#ifdef ARDUINO
+    class StreamPort : public Port {  // a Stream as a Port
+    public:
+        Stream* stream = nullptr;
+        size_t read(uint8_t* data, size_t max) override {
+            int n = stream->available();
+            if (n <= 0)
+                return 0;
+            return stream->readBytes(data, (size_t) n < max ? (size_t) n : max);
+        }
+        size_t write(const uint8_t* data, size_t length) override { return stream->write(data, length); }
+        void flush() override { stream->flush(); }
+    };
+    StreamPort streamPort_;
+#endif
+    Port* port_;
     uint32_t baud_;
     uint8_t serverId_;
     size_t numCoils_;
@@ -160,7 +197,7 @@ private:
     static const size_t BUFFER_SIZE = 512;
     uint8_t buffer_[BUFFER_SIZE];
     size_t bufferIndex_;
-    unsigned long lastByteTime_;
+    uint32_t lastByteTime_;
     uint32_t interFrameTimeout_;
 
     static const uint16_t crcTable_[256];
@@ -176,13 +213,14 @@ private:
     size_t echoFrameEnds_[ECHO_MAX_FRAMES];
     uint8_t echoFrameCount_;
     uint8_t echoFrameIndex_;
-    unsigned long echoTime_;
+    uint32_t echoTime_;
     bool echoFilter_;
     bool echoDetected_;
 
     uint16_t computeCrc(uint8_t* data, size_t length);
     void processRequest(uint8_t* data, size_t length);
     void storeByte(uint8_t b);
+    void handOver();
     void expectEcho(const uint8_t* data, size_t length);
     bool filterEcho(uint8_t b);
     void releaseEcho();

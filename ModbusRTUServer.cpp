@@ -1,5 +1,50 @@
 #include "ModbusRTUServer.h"
 #include <string.h>
+#include <algorithm>
+
+// What the library needs from the platform: the time in microseconds, the TX enable pin, and a pause after
+// enabling the transmitter. On Arduino, on ESP-IDF without Arduino, or anywhere else (a PC, for tests: no pins).
+#if defined(ARDUINO)
+static uint32_t nowUs() { return micros(); }
+static void pinInit(int16_t pin) { pinMode(pin, OUTPUT); }
+static void pinSet(int16_t pin, bool high) { digitalWrite(pin, high ? HIGH : LOW); }
+#elif defined(ESP_PLATFORM)
+#include "driver/gpio.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+static uint32_t nowUs() { return (uint32_t) esp_timer_get_time(); }
+static void pinInit(int16_t pin) {
+    gpio_reset_pin((gpio_num_t) pin);
+    gpio_set_direction((gpio_num_t) pin, GPIO_MODE_OUTPUT);
+}
+static void pinSet(int16_t pin, bool high) { gpio_set_level((gpio_num_t) pin, high); }
+#else
+#include <chrono>
+static uint32_t nowUs() {
+    return (uint32_t) std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+static void pinInit(int16_t) {}
+static void pinSet(int16_t, bool) {}
+#endif
+
+// After enabling the transmitter: an ESP32 lets other tasks run, other boards wait for the transceiver
+static void txSettle() {
+#if defined(ESP_PLATFORM)
+    taskYIELD();
+#elif defined(ARDUINO)
+    delayMicroseconds(MODBUS_TX_ENABLE_DELAY_US);
+#endif
+}
+
+// Outside Arduino the CRC table is plain const data
+#ifndef PROGMEM
+#define PROGMEM
+#endif
+#ifndef pgm_read_word
+#define pgm_read_word(p) (*(const uint16_t*) (p))
+#endif
 
 const uint16_t PROGMEM ModbusRTUServer::crcTable_[256] = {
     0x0000, 0xC0C1, 0xC181, 0x0140, 0xC301, 0x03C0, 0x0280, 0xC241,
@@ -41,7 +86,7 @@ ModbusRTUServer::ModbusRTUServer()
         holdingRegisters(nullptr),
         discreteInputs(nullptr),
         inputRegisters(nullptr),
-        stream_(nullptr),
+        port_(nullptr),
         baud_(9600),
         serverId_(1),
         numCoils_(0),
@@ -84,11 +129,22 @@ ModbusRTUServer::~ModbusRTUServer() {
     #endif
 }
 
+#ifdef ARDUINO
 void ModbusRTUServer::begin(Stream* stream, uint32_t baud, uint8_t serverId,
                             int16_t txEnablePin, bool txEnableActiveHigh,
                             size_t numCoils, size_t numHoldingRegisters,
                             size_t numDiscreteInputs, size_t numInputRegisters) {
-    stream_ = stream;
+    streamPort_.stream = stream;
+    begin(&streamPort_, baud, serverId, txEnablePin, txEnableActiveHigh, numCoils, numHoldingRegisters,
+          numDiscreteInputs, numInputRegisters);
+}
+#endif
+
+void ModbusRTUServer::begin(Port* port, uint32_t baud, uint8_t serverId,
+                            int16_t txEnablePin, bool txEnableActiveHigh,
+                            size_t numCoils, size_t numHoldingRegisters,
+                            size_t numDiscreteInputs, size_t numInputRegisters) {
+    port_ = port;
     baud_ = baud;
     serverId_ = serverId;
     numCoils_ = numCoils;
@@ -99,8 +155,8 @@ void ModbusRTUServer::begin(Stream* stream, uint32_t baud, uint8_t serverId,
     txEnableActiveHigh_ = txEnableActiveHigh;
 
     if (txEnablePin_ >= 0) {
-        pinMode(txEnablePin_, OUTPUT);
-        digitalWrite(txEnablePin_, txEnableActiveHigh_ ? LOW : HIGH);
+        pinInit(txEnablePin_);
+        pinSet(txEnablePin_, !txEnableActiveHigh_);
     }
 
     #if !defined(MODBUS_DISABLE_READ_COILS)
@@ -198,53 +254,46 @@ void ModbusRTUServer::begin(Stream* stream, uint32_t baud, uint8_t serverId,
     #endif
 
     bufferIndex_ = 0;
-    lastByteTime_ = micros();
+    lastByteTime_ = nowUs();
     uint32_t charTimeUs = 11 * 1000000UL / baud;
     interFrameTimeout_ = baud_ > 19200 ? 1750UL : uint32_t(3.5f * charTimeUs);
 }
 
 void ModbusRTUServer::update() {
-    if (!stream_)
+    if (!port_)
         return;
 
-    while (stream_->available() > 0) {
-        int b = stream_->read();
-        if (b < 0)
-            break;
+    // Never more than fits. With custom framing a full buffer goes to the handler for room, else the rest
+    // waits in the port.
+    uint8_t chunk[64];
+    size_t n;
+    while (bufferIndex_ < BUFFER_SIZE &&
+           (n = port_->read(chunk, std::min(sizeof chunk, BUFFER_SIZE - bufferIndex_))) > 0) {
+        lastByteTime_ = nowUs();
 
-        lastByteTime_ = micros();
+        for (size_t i = 0; i < n; i++) {
+            if (!filterEcho(chunk[i]))
+                storeByte(chunk[i]);
+        }
 
-        if (!filterEcho((uint8_t)b))
-            storeByte((uint8_t)b);
+        if (bufferIndex_ >= BUFFER_SIZE && onRawBuffer)
+            handOver();
     }
 
     // Our echo should be back long before this. If it isn't, the bytes we held
     // back weren't an echo after all, so hand them on.
-    if (echoLength_ > 0 && (micros() - echoTime_) > ECHO_TIMEOUT_US + interFrameTimeout_)
+    if (echoLength_ > 0 && (nowUs() - echoTime_) > ECHO_TIMEOUT_US + interFrameTimeout_)
         releaseEcho();
 
     if (bufferIndex_ == 0)
         return;
 
-    // Custom framing: hand over the whole buffer each call and keep whatever it
-    // doesn't consume. Needed for buses that blast frames with no interframe gap.
     if (onRawBuffer) {
-        size_t consumed = onRawBuffer(buffer_, bufferIndex_);
-
-        if (consumed >= bufferIndex_) {
-            bufferIndex_ = 0;
-        } else if (consumed > 0) {
-            memmove(buffer_, buffer_ + consumed, bufferIndex_ - consumed);
-            bufferIndex_ -= consumed;
-        } else if (bufferIndex_ >= BUFFER_SIZE) {
-            // Buffer full and nothing consumed: drop it so we don't wedge.
-            bufferIndex_ = 0;
-        }
-
+        handOver();
         return;
     }
 
-    if ((micros() - lastByteTime_) >= interFrameTimeout_) {
+    if ((nowUs() - lastByteTime_) >= interFrameTimeout_) {
         processRequest(buffer_, bufferIndex_);
         bufferIndex_ = 0;
     }
@@ -288,7 +337,7 @@ uint16_t ModbusRTUServer::computeCrc(uint8_t* data, size_t length) {
 }
 
 void ModbusRTUServer::sendResponse(uint8_t* data, size_t length, bool broadcast) {
-    if (broadcast || !stream_) 
+    if (broadcast || !port_)
         return;
 
     uint16_t crc = computeCrc(data, length);
@@ -298,20 +347,16 @@ void ModbusRTUServer::sendResponse(uint8_t* data, size_t length, bool broadcast)
 
     if (txEnablePin_ >= 0)
     {
-        digitalWrite(txEnablePin_, txEnableActiveHigh_ ? HIGH : LOW);
-        # if !defined(ESP32)
-        delayMicroseconds(MODBUS_TX_ENABLE_DELAY_US);
-        #else
-        taskYIELD();
-        #endif
+        pinSet(txEnablePin_, txEnableActiveHigh_);
+        txSettle();
     }
 
-    stream_->write(data, length + 2);
-    stream_->flush();
+    port_->write(data, length + 2);
+    port_->flush();
 
     if (txEnablePin_ >= 0)
     {
-        digitalWrite(txEnablePin_, txEnableActiveHigh_ ? LOW : HIGH);
+        pinSet(txEnablePin_, !txEnableActiveHigh_);
     }
 
     expectEcho(data, length + 2);
@@ -349,11 +394,26 @@ bool ModbusRTUServer::echoDetected() const {
     return echoDetected_;
 }
 
-void ModbusRTUServer::storeByte(uint8_t b) {
-    if (bufferIndex_ >= BUFFER_SIZE)
-        bufferIndex_ = 0;
+// Custom framing: hand over the whole buffer and keep whatever it doesn't
+// consume. Needed for buses that blast frames with no interframe gap.
+void ModbusRTUServer::handOver() {
+    size_t consumed = onRawBuffer(buffer_, bufferIndex_);
 
-    buffer_[bufferIndex_++] = b;
+    if (consumed >= bufferIndex_) {
+        bufferIndex_ = 0;
+    } else if (consumed > 0) {
+        memmove(buffer_, buffer_ + consumed, bufferIndex_ - consumed);
+        bufferIndex_ -= consumed;
+    } else if (bufferIndex_ >= BUFFER_SIZE) {
+        // Buffer full and nothing consumed: drop it so we don't wedge.
+        bufferIndex_ = 0;
+    }
+}
+
+// A full buffer drops the byte. Starting over would overwrite frames not handed on yet.
+void ModbusRTUServer::storeByte(uint8_t b) {
+    if (bufferIndex_ < BUFFER_SIZE)
+        buffer_[bufferIndex_++] = b;
 }
 
 void ModbusRTUServer::expectEcho(const uint8_t* data, size_t length) {
@@ -369,7 +429,7 @@ void ModbusRTUServer::expectEcho(const uint8_t* data, size_t length) {
     memcpy(echo_ + echoLength_, data, length);
     echoLength_ += length;
     echoFrameEnds_[echoFrameCount_++] = echoLength_;
-    echoTime_ = micros();
+    echoTime_ = nowUs();
 }
 
 bool ModbusRTUServer::filterEcho(uint8_t b) {
@@ -383,7 +443,7 @@ bool ModbusRTUServer::filterEcho(uint8_t b) {
     }
 
     echoPos_++;
-    echoTime_ = micros();
+    echoTime_ = nowUs();
 
     if (echoPos_ == echoFrameEnds_[echoFrameIndex_]) {
         // A whole frame came back, CRC and all, so drop it. Write single coil and
