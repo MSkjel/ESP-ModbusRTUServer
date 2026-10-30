@@ -95,8 +95,8 @@ jobs:
 
           // the server on UART1 through ESP-IDF's driver
           struct UartPort : ModbusRTUServer::Port {
-              size_t read(uint8_t* data, size_t max) override {
-                  int n = uart_read_bytes(UART_NUM_1, data, max, 0);
+              size_t read(uint8_t* data, size_t maxLength) override {
+                  int n = uart_read_bytes(UART_NUM_1, data, maxLength, 0);
                   return n > 0 ? (size_t) n : 0;
               }
               size_t write(const uint8_t* data, size_t length) override {
@@ -143,8 +143,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Test on CI
-        run: |
-          g++ -std=c++17 -Wall -Wextra -Werror -fsanitize=address,undefined -I. tests/host_test.cpp \
-            ModbusRTUServer.cpp -o host_test
-          ./host_test
+      - name: The host test, see tests/Makefile
+        run: make -C tests

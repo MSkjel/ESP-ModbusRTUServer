@@ -1,9 +1,12 @@
 #include "ModbusRTUServer.h"
 #include <string.h>
-#include <algorithm>
 
 // What the library needs from the platform: the time in microseconds, the TX enable pin, and a pause after
 // enabling the transmitter. On Arduino, on ESP-IDF without Arduino, or anywhere else (a PC, for tests: no pins).
+#if defined(ESP_PLATFORM)
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#endif
 #if defined(ARDUINO)
 static uint32_t nowUs() { return micros(); }
 static void pinInit(int16_t pin) { pinMode(pin, OUTPUT); }
@@ -11,8 +14,6 @@ static void pinSet(int16_t pin, bool high) { digitalWrite(pin, high ? HIGH : LOW
 #elif defined(ESP_PLATFORM)
 #include "driver/gpio.h"
 #include "esp_timer.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 static uint32_t nowUs() { return (uint32_t) esp_timer_get_time(); }
 static void pinInit(int16_t pin) {
     gpio_reset_pin((gpio_num_t) pin);
@@ -29,7 +30,8 @@ static void pinInit(int16_t) {}
 static void pinSet(int16_t, bool) {}
 #endif
 
-// After enabling the transmitter: an ESP32 lets other tasks run, other boards wait for the transceiver
+// After enabling the transmitter: an ESP32 lets other tasks run, which is all the time its transceiver needs,
+// other boards wait MODBUS_TX_ENABLE_DELAY_US for theirs
 static void txSettle() {
 #if defined(ESP_PLATFORM)
     taskYIELD();
@@ -81,52 +83,19 @@ const uint16_t PROGMEM ModbusRTUServer::crcTable_[256] = {
     0x8201, 0x42C0, 0x4380, 0x8341, 0x4100, 0x81C1, 0x8081, 0x4040
 };
 
-ModbusRTUServer::ModbusRTUServer()
-    :   coils(nullptr),
-        holdingRegisters(nullptr),
-        discreteInputs(nullptr),
-        inputRegisters(nullptr),
-        port_(nullptr),
-        baud_(9600),
-        serverId_(1),
-        numCoils_(0),
-        numHoldingRegisters_(0),
-        numDiscreteInputs_(0),
-        numInputRegisters_(0),
-        bufferIndex_(0),
-        lastByteTime_(0),
-        interFrameTimeout_(5),
-        echoLength_(0),
-        echoPos_(0),
-        echoFrameStart_(0),
-        echoFrameCount_(0),
-        echoFrameIndex_(0),
-        echoTime_(0),
-        echoFilter_(true),
-        echoDetected_(false)
-{}
-
 ModbusRTUServer::~ModbusRTUServer() {
-    #if !defined(MODBUS_DISABLE_READ_COILS) || !defined(MODBUS_DISABLE_WRITE_SINGLE_COIL) || !defined(MODBUS_DISABLE_WRITE_MULTIPLE_COILS)
-    if (coils) {
-        delete[] coils;
-    }
-    #endif
-    #if !defined(MODBUS_DISABLE_READ_HOLDING_REGISTERS) || !defined(MODBUS_DISABLE_WRITE_SINGLE_REGISTER) || !defined(MODBUS_DISABLE_WRITE_MULTIPLE_REGISTERS)
-    if (holdingRegisters) {
-        delete[] holdingRegisters;
-    }
-    #endif
-    #if !defined(MODBUS_DISABLE_READ_DISCRETE_INPUTS)
-    if (discreteInputs) {
-        delete[] discreteInputs;
-    }
-    #endif
-    #if !defined(MODBUS_DISABLE_READ_INPUT_REGISTERS)
-    if (inputRegisters) {
-        delete[] inputRegisters;
-    }
-    #endif
+#ifdef MODBUS_HAS_COILS
+    delete[] coils;
+#endif
+#ifdef MODBUS_HAS_HOLDING_REGISTERS
+    delete[] holdingRegisters;
+#endif
+#ifdef MODBUS_HAS_DISCRETE_INPUTS
+    delete[] discreteInputs;
+#endif
+#ifdef MODBUS_HAS_INPUT_REGISTERS
+    delete[] inputRegisters;
+#endif
 }
 
 #ifdef ARDUINO
@@ -140,17 +109,19 @@ void ModbusRTUServer::begin(Stream* stream, uint32_t baud, uint8_t serverId,
 }
 #endif
 
+// A table of n zeroes in place of the one there, if any
+template <typename T>
+static void makeTable(T*& t, size_t n) {
+    delete[] t;
+    t = n ? new T[n]() : nullptr;
+}
+
 void ModbusRTUServer::begin(Port* port, uint32_t baud, uint8_t serverId,
                             int16_t txEnablePin, bool txEnableActiveHigh,
                             size_t numCoils, size_t numHoldingRegisters,
                             size_t numDiscreteInputs, size_t numInputRegisters) {
     port_ = port;
-    baud_ = baud;
     serverId_ = serverId;
-    numCoils_ = numCoils;
-    numHoldingRegisters_ = numHoldingRegisters;
-    numDiscreteInputs_ = numDiscreteInputs;
-    numInputRegisters_ = numInputRegisters;
     txEnablePin_ = txEnablePin;
     txEnableActiveHigh_ = txEnableActiveHigh;
 
@@ -159,116 +130,86 @@ void ModbusRTUServer::begin(Port* port, uint32_t baud, uint8_t serverId,
         pinSet(txEnablePin_, !txEnableActiveHigh_);
     }
 
-    #if !defined(MODBUS_DISABLE_READ_COILS)
-    onReadCoils = [this](uint8_t* data, size_t length, bool broadcast) {
-        handleReadCoils(data, length, broadcast);
-    };
-    #endif
-
-    #if !defined(MODBUS_DISABLE_READ_DISCRETE_INPUTS)
+#ifndef MODBUS_DISABLE_READ_COILS
+    onReadCoils = [this](uint8_t* data, size_t length, bool broadcast) { handleReadCoils(data, length, broadcast); };
+#endif
+#ifndef MODBUS_DISABLE_READ_DISCRETE_INPUTS
     onReadDiscreteInputs = [this](uint8_t* data, size_t length, bool broadcast) {
         handleReadDiscreteInputs(data, length, broadcast);
     };
-    #endif
-
-    #if !defined(MODBUS_DISABLE_READ_HOLDING_REGISTERS)
+#endif
+#ifndef MODBUS_DISABLE_READ_HOLDING_REGISTERS
     onReadHoldingRegisters = [this](uint8_t* data, size_t length, bool broadcast) {
         handleReadHoldingRegisters(data, length, broadcast);
     };
-    #endif
-
-    #if !defined(MODBUS_DISABLE_READ_INPUT_REGISTERS)
+#endif
+#ifndef MODBUS_DISABLE_READ_INPUT_REGISTERS
     onReadInputRegisters = [this](uint8_t* data, size_t length, bool broadcast) {
         handleReadInputRegisters(data, length, broadcast);
     };
-    #endif
-
-    #if !defined(MODBUS_DISABLE_REPORT_SERVER_ID)
+#endif
+#ifndef MODBUS_DISABLE_REPORT_SERVER_ID
     onReportServerID = [this](uint8_t* data, size_t length, bool broadcast) {
         handleReportServerID(data, length, broadcast);
     };
-    #endif
-
-    #if !defined(MODBUS_DISABLE_WRITE_SINGLE_COIL)
+#endif
+#ifndef MODBUS_DISABLE_WRITE_SINGLE_COIL
     onWriteSingleCoil = [this](uint8_t* data, size_t length, bool broadcast) {
         handleWriteSingleCoil(data, length, broadcast);
     };
-    #endif
-
-    #if !defined(MODBUS_DISABLE_WRITE_SINGLE_REGISTER)
+#endif
+#ifndef MODBUS_DISABLE_WRITE_SINGLE_REGISTER
     onWriteSingleRegister = [this](uint8_t* data, size_t length, bool broadcast) {
         handleWriteSingleRegister(data, length, broadcast);
     };
-    #endif
-
-    #if !defined(MODBUS_DISABLE_WRITE_MULTIPLE_COILS)
+#endif
+#ifndef MODBUS_DISABLE_WRITE_MULTIPLE_COILS
     onWriteMultipleCoils = [this](uint8_t* data, size_t length, bool broadcast) {
         handleWriteMultipleCoils(data, length, broadcast);
     };
-    #endif
-
-    #if !defined(MODBUS_DISABLE_WRITE_MULTIPLE_REGISTERS)
+#endif
+#ifndef MODBUS_DISABLE_WRITE_MULTIPLE_REGISTERS
     onWriteMultipleRegisters = [this](uint8_t* data, size_t length, bool broadcast) {
         handleWriteMultipleRegisters(data, length, broadcast);
     };
-    #endif
-
+#endif
     onInvalidFunction = [this](uint8_t* data, size_t, bool broadcast) {
-        sendException(data[1], 0x01, broadcast);
+        sendException(data[1], ILLEGAL_FUNCTION, broadcast);
     };
 
-    onInvalidServer = nullptr;
+    numCoils_ = numCoils;
+    numHoldingRegisters_ = numHoldingRegisters;
+    numDiscreteInputs_ = numDiscreteInputs;
+    numInputRegisters_ = numInputRegisters;
+#ifdef MODBUS_HAS_COILS
+    makeTable(coils, numCoils);
+#endif
+#ifdef MODBUS_HAS_HOLDING_REGISTERS
+    makeTable(holdingRegisters, numHoldingRegisters);
+#endif
+#ifdef MODBUS_HAS_DISCRETE_INPUTS
+    makeTable(discreteInputs, numDiscreteInputs);
+#endif
+#ifdef MODBUS_HAS_INPUT_REGISTERS
+    makeTable(inputRegisters, numInputRegisters);
+#endif
 
-    onInvalidCrc = nullptr;
-
-    #if !defined(MODBUS_DISABLE_READ_COILS)
-    if (numCoils > 0) {
-        coils = new bool[numCoils];
-        
-        std::fill_n(coils, numCoils, 0);
-    }
-    #endif
-
-    #if !defined(MODBUS_DISABLE_READ_HOLDING_REGISTERS)
-    if (numHoldingRegisters > 0) {
-        holdingRegisters = new uint16_t[numHoldingRegisters];
-
-        std::fill_n(holdingRegisters, numHoldingRegisters, 0);
-    }
-    #endif
-
-    #if !defined(MODBUS_DISABLE_READ_DISCRETE_INPUTS)
-    if (numDiscreteInputs > 0) {
-        discreteInputs = new bool[numDiscreteInputs];
-
-        std::fill_n(discreteInputs, numDiscreteInputs, 0);
-    }
-    #endif
-
-    #if !defined(MODBUS_DISABLE_READ_INPUT_REGISTERS)
-    if (numInputRegisters > 0) {
-        inputRegisters = new uint16_t[numInputRegisters];
-
-        std::fill_n(inputRegisters, numInputRegisters, 0);
-    }
-    #endif
-
+    // A frame ends with 3.5 characters of silence, 11 bits each, or a fixed 1.75 ms above 19200 baud
     bufferIndex_ = 0;
     lastByteTime_ = nowUs();
-    uint32_t charTimeUs = 11 * 1000000UL / baud;
-    interFrameTimeout_ = baud_ > 19200 ? 1750UL : uint32_t(3.5f * charTimeUs);
+    interframeTimeout_ = baud > 19200 || baud == 0 ? 1750 : (uint32_t) (3.5f * (11 * 1000000UL / baud));
 }
 
 void ModbusRTUServer::update() {
     if (!port_)
         return;
 
-    // Never more than fits. With custom framing a full buffer goes to the handler for room, else the rest
-    // waits in the port.
-    uint8_t chunk[64];
+    // Read at most what the buffer has room for, less the bytes held back as a possible echo, which go in first
+    // if it turns out not to be one. With custom framing a full buffer goes to the handler for room; without it
+    // the rest stays in the port until the frame is processed.
+    uint8_t chunk[READ_CHUNK];
     size_t n;
-    while (bufferIndex_ < BUFFER_SIZE &&
-           (n = port_->read(chunk, std::min(sizeof chunk, BUFFER_SIZE - bufferIndex_))) > 0) {
+    while (room() > 0 && (n = port_->read(chunk, std::min(sizeof chunk, room()))) > 0) {
         lastByteTime_ = nowUs();
 
         for (size_t i = 0; i < n; i++) {
@@ -276,13 +217,13 @@ void ModbusRTUServer::update() {
                 storeByte(chunk[i]);
         }
 
-        if (bufferIndex_ >= BUFFER_SIZE && onRawBuffer)
+        if (room() == 0 && onRawBuffer)
             handOver();
     }
 
     // Our echo should be back long before this. If it isn't, the bytes we held
     // back weren't an echo after all, so hand them on.
-    if (echoLength_ > 0 && (nowUs() - echoTime_) > ECHO_TIMEOUT_US + interFrameTimeout_)
+    if (echoLength_ > 0 && (nowUs() - echoTime_) > ECHO_TIMEOUT_US + interframeTimeout_)
         releaseEcho();
 
     if (bufferIndex_ == 0)
@@ -293,46 +234,16 @@ void ModbusRTUServer::update() {
         return;
     }
 
-    if ((nowUs() - lastByteTime_) >= interFrameTimeout_) {
-        processRequest(buffer_, bufferIndex_);
+    if ((nowUs() - lastByteTime_) >= interframeTimeout_) {
+        processFrame(buffer_, bufferIndex_);
         bufferIndex_ = 0;
     }
 }
 
-uint16_t ModbusRTUServer::computeCrc(uint8_t* data, size_t length) {
+uint16_t ModbusRTUServer::computeCrc(const uint8_t* data, size_t length) {
     uint16_t crc = 0xFFFF;
-    size_t pos = 0;
-    
-    while (pos < length && ((uintptr_t)(data + pos) & 3) != 0) {
-        uint8_t index = crc ^ data[pos];
-        crc = (crc >> 8) ^ pgm_read_word(&crcTable_[index]);
-        pos++;
-    }
-    
-    while (pos + 4 <= length) {
-        uint32_t word = *(uint32_t*)(data + pos);
-        
-        uint8_t index0 = crc ^ (word & 0xFF);
-        crc = (crc >> 8) ^ pgm_read_word(&crcTable_[index0]);
-        
-        uint8_t index1 = crc ^ ((word >> 8) & 0xFF);
-        crc = (crc >> 8) ^ pgm_read_word(&crcTable_[index1]);
-        
-        uint8_t index2 = crc ^ ((word >> 16) & 0xFF);
-        crc = (crc >> 8) ^ pgm_read_word(&crcTable_[index2]);
-        
-        uint8_t index3 = crc ^ ((word >> 24) & 0xFF);
-        crc = (crc >> 8) ^ pgm_read_word(&crcTable_[index3]);
-        
-        pos += 4;
-    }
-    
-    while (pos < length) {
-        uint8_t index = crc ^ data[pos];
-        crc = (crc >> 8) ^ pgm_read_word(&crcTable_[index]);
-        pos++;
-    }
-    
+    for (size_t i = 0; i < length; i++)
+        crc = (crc >> 8) ^ pgm_read_word(&crcTable_[(uint8_t) (crc ^ data[i])]);
     return crc;
 }
 
@@ -341,12 +252,10 @@ void ModbusRTUServer::sendResponse(uint8_t* data, size_t length, bool broadcast)
         return;
 
     uint16_t crc = computeCrc(data, length);
-
     data[length] = crc & 0xFF;
     data[length + 1] = (crc >> 8) & 0xFF;
 
-    if (txEnablePin_ >= 0)
-    {
+    if (txEnablePin_ >= 0) {
         pinSet(txEnablePin_, txEnableActiveHigh_);
         txSettle();
     }
@@ -355,9 +264,7 @@ void ModbusRTUServer::sendResponse(uint8_t* data, size_t length, bool broadcast)
     port_->flush();
 
     if (txEnablePin_ >= 0)
-    {
         pinSet(txEnablePin_, !txEnableActiveHigh_);
-    }
 
     expectEcho(data, length + 2);
 }
@@ -367,16 +274,12 @@ void ModbusRTUServer::sendException(uint8_t function, uint8_t exceptionCode, boo
         return;
 
     // Through sendResponse, so it gets the CRC, the TX enable pin and the flush
-    uint8_t response[5];
-    response[0] = serverId_;
-    response[1] = function | 0x80;
-    response[2] = exceptionCode;
-
+    uint8_t response[5] = {serverId_, (uint8_t) (function | 0x80), exceptionCode};
     sendResponse(response, 3, broadcast);
 }
 
-void ModbusRTUServer::setInterframeTimeout(uint32_t timeout) {
-    interFrameTimeout_ = timeout;
+void ModbusRTUServer::setInterframeTimeout(uint32_t timeoutUs) {
+    interframeTimeout_ = timeoutUs;
 }
 
 void ModbusRTUServer::setServerId(uint8_t serverId) {
@@ -392,6 +295,13 @@ void ModbusRTUServer::setEchoFilter(bool enabled) {
 
 bool ModbusRTUServer::echoDetected() const {
     return echoDetected_;
+}
+
+// What the buffer takes: the room left, less what a possible echo holds back
+size_t ModbusRTUServer::room() const {
+    size_t held = echoPos_ - echoFrameStart_;
+    size_t left = BUFFER_SIZE - bufferIndex_;
+    return left > held ? left - held : 0;
 }
 
 // Custom framing: hand over the whole buffer and keep whatever it doesn't
@@ -410,20 +320,20 @@ void ModbusRTUServer::handOver() {
     }
 }
 
-// A full buffer drops the byte. Starting over would overwrite frames not handed on yet.
+// update() reads no more than there's room for, so this never drops one
 void ModbusRTUServer::storeByte(uint8_t b) {
     if (bufferIndex_ < BUFFER_SIZE)
         buffer_[bufferIndex_++] = b;
 }
 
 void ModbusRTUServer::expectEcho(const uint8_t* data, size_t length) {
-    if (!echoFilter_ || length > ECHO_SIZE)
+    if (!echoFilter_ || length > MAX_FRAME)
         return;
 
     // No room behind what we're already waiting for. Can only happen if we keep
     // sending and nothing comes back, so that wasn't an echo anyway. Dropped rather
     // than released, since this can run while an onRawBuffer handler is using the buffer.
-    if (echoFrameCount_ >= ECHO_MAX_FRAMES || echoLength_ + length > ECHO_SIZE)
+    if (echoFrameCount_ >= ECHO_MAX_FRAMES || echoLength_ + length > MAX_FRAME)
         clearEcho();
 
     memcpy(echo_ + echoLength_, data, length);
@@ -450,7 +360,7 @@ bool ModbusRTUServer::filterEcho(uint8_t b) {
         // write single register answers are identical to the request, so those
         // could also be a master retrying.
         uint8_t function = echo_[echoFrameStart_ + 1];
-        if (function != 0x05 && function != 0x06)
+        if (function != WRITE_SINGLE_COIL && function != WRITE_SINGLE_REGISTER)
             echoDetected_ = true;
 
         echoFrameStart_ = echoPos_;
@@ -478,7 +388,7 @@ void ModbusRTUServer::clearEcho() {
     echoFrameIndex_ = 0;
 }
 
-bool ModbusRTUServer::checkCrc(uint8_t* data, size_t length) {
+bool ModbusRTUServer::checkCrc(const uint8_t* data, size_t length) {
     if (length < 4)
         return false;
 
@@ -486,460 +396,249 @@ bool ModbusRTUServer::checkCrc(uint8_t* data, size_t length) {
 }
 
 void ModbusRTUServer::processFrame(uint8_t* data, size_t length) {
-    processRequest(data, length);
-}
-
-inline void ModbusRTUServer::processRequest(uint8_t* data, size_t length) {
-    if (length < 4) 
+    if (length < 4)
         return;
 
-    uint8_t recvServerId = data[0];
-    bool broadcast = (recvServerId == 0);
+    bool broadcast = data[0] == 0;
 
-    if (!broadcast && recvServerId != serverId_)
-    {
-        if (onInvalidServer) {
+    if (!broadcast && data[0] != serverId_) {
+        if (onInvalidServer)
             onInvalidServer(data, length, broadcast);
-        }
         return;
     }
 
-    if (computeCrc(data, length) != 0) 
-    {
-        if (onInvalidCrc) {
+    if (computeCrc(data, length) != 0) {
+        if (onInvalidCrc)
             onInvalidCrc(data, length, broadcast);
-        }
         return;
     }
 
-    uint8_t function = data[1];
-
-    switch (function) {
-        #if !defined(MODBUS_DISABLE_READ_COILS)
-        case 0x01:
+    switch (data[1]) {
+#ifndef MODBUS_DISABLE_READ_COILS
+        case READ_COILS:
             onReadCoils(data, length, broadcast);
             break;
-        #endif
-        #if !defined(MODBUS_DISABLE_READ_DISCRETE_INPUTS)
-        case 0x02:
+#endif
+#ifndef MODBUS_DISABLE_READ_DISCRETE_INPUTS
+        case READ_DISCRETE_INPUTS:
             onReadDiscreteInputs(data, length, broadcast);
             break;
-        #endif
-        #if !defined(MODBUS_DISABLE_READ_HOLDING_REGISTERS)
-        case 0x03:
+#endif
+#ifndef MODBUS_DISABLE_READ_HOLDING_REGISTERS
+        case READ_HOLDING_REGISTERS:
             onReadHoldingRegisters(data, length, broadcast);
             break;
-        #endif
-        #if !defined(MODBUS_DISABLE_READ_INPUT_REGISTERS)
-        case 0x04:
+#endif
+#ifndef MODBUS_DISABLE_READ_INPUT_REGISTERS
+        case READ_INPUT_REGISTERS:
             onReadInputRegisters(data, length, broadcast);
             break;
-        #endif
-        #if !defined(MODBUS_DISABLE_WRITE_SINGLE_COIL)
-        case 0x05:
+#endif
+#ifndef MODBUS_DISABLE_WRITE_SINGLE_COIL
+        case WRITE_SINGLE_COIL:
             onWriteSingleCoil(data, length, broadcast);
             break;
-        #endif
-        #if !defined(MODBUS_DISABLE_WRITE_SINGLE_REGISTER)
-        case 0x06:
+#endif
+#ifndef MODBUS_DISABLE_WRITE_SINGLE_REGISTER
+        case WRITE_SINGLE_REGISTER:
             onWriteSingleRegister(data, length, broadcast);
             break;
-        #endif
-        #if !defined(MODBUS_DISABLE_WRITE_MULTIPLE_COILS)
-        case 0x0F:
+#endif
+#ifndef MODBUS_DISABLE_WRITE_MULTIPLE_COILS
+        case WRITE_MULTIPLE_COILS:
             onWriteMultipleCoils(data, length, broadcast);
             break;
-        #endif
-        #if !defined(MODBUS_DISABLE_WRITE_MULTIPLE_REGISTERS)
-        case 0x10:
+#endif
+#ifndef MODBUS_DISABLE_WRITE_MULTIPLE_REGISTERS
+        case WRITE_MULTIPLE_REGISTERS:
             onWriteMultipleRegisters(data, length, broadcast);
             break;
-        #endif
-        #if !defined(MODBUS_DISABLE_REPORT_SERVER_ID)
-        case 0x11:
+#endif
+#ifndef MODBUS_DISABLE_REPORT_SERVER_ID
+        case REPORT_SERVER_ID:
             onReportServerID(data, length, broadcast);
             break;
-        #endif
+#endif
         default:
             onInvalidFunction(data, length, broadcast);
             break;
     }
 }
 
-#if !defined(MODBUS_DISABLE_READ_COILS)
+// FC 01 and 02: quantity bits from start, eight to a byte, the lowest first
+void ModbusRTUServer::readBits(const bool* table, size_t count, uint8_t* data, size_t length, bool broadcast) {
+    if (length != 8)
+        return;
+
+    uint16_t start = (data[2] << 8) | data[3];
+    uint16_t quantity = (data[4] << 8) | data[5];
+
+    if (quantity < 1 || quantity > MAX_READ_BITS) {
+        sendException(data[1], ILLEGAL_DATA_VALUE, broadcast);
+        return;
+    }
+    if ((size_t) start + quantity > count) {
+        sendException(data[1], ILLEGAL_DATA_ADDRESS, broadcast);
+        return;
+    }
+
+    uint8_t response[MAX_FRAME] = {serverId_, data[1], (uint8_t) ((quantity + 7) / 8)};
+    for (uint16_t i = 0; i < quantity; i++) {
+        if (table[start + i])
+            response[3 + i / 8] |= 1 << (i % 8);
+    }
+
+    sendResponse(response, 3 + response[2], broadcast);
+}
+
+// FC 03 and 04: quantity registers from start, high byte first
+void ModbusRTUServer::readRegisters(const uint16_t* table, size_t count, uint8_t* data, size_t length,
+                                    bool broadcast) {
+    if (length != 8)
+        return;
+
+    uint16_t start = (data[2] << 8) | data[3];
+    uint16_t quantity = (data[4] << 8) | data[5];
+
+    if (quantity < 1 || quantity > MAX_READ_REGISTERS) {
+        sendException(data[1], ILLEGAL_DATA_VALUE, broadcast);
+        return;
+    }
+    if ((size_t) start + quantity > count) {
+        sendException(data[1], ILLEGAL_DATA_ADDRESS, broadcast);
+        return;
+    }
+
+    uint8_t response[MAX_FRAME] = {serverId_, data[1], (uint8_t) (quantity * 2)};
+    for (uint16_t i = 0; i < quantity; i++) {
+        response[3 + 2 * i] = table[start + i] >> 8;
+        response[4 + 2 * i] = table[start + i] & 0xFF;
+    }
+
+    sendResponse(response, 3 + response[2], broadcast);
+}
+
+#ifndef MODBUS_DISABLE_READ_COILS
 void ModbusRTUServer::handleReadCoils(uint8_t* data, size_t length, bool broadcast) {
-    if (length != 8) 
-        return;
-
-    uint16_t startAddress = (data[2] << 8) | data[3];
-    uint16_t quantity = (data[4] << 8) | data[5];
-
-    if (quantity < 1 || quantity > 2000 || (startAddress + quantity) > numCoils_) {
-        sendException(data[1], 0x02, broadcast);
-        return;
-    }
-
-    uint8_t byteCount = (quantity + 7) >> 3;
-    uint8_t response[BUFFER_SIZE];
-    response[0] = serverId_;
-    response[1] = data[1];
-    response[2] = byteCount;
-
-    std::fill_n(&response[3], byteCount, 0);
-
-    bool* coilPtr = coils + startAddress;
-    uint16_t remaining = quantity;
-    uint16_t i = 0;
-
-    while (remaining >= 8) {
-        if (coilPtr[0]) response[3 + (i / 8)] |= (1 << (i % 8));
-        if (coilPtr[1]) response[3 + ((i + 1) / 8)] |= (1 << ((i + 1) % 8));
-        if (coilPtr[2]) response[3 + ((i + 2) / 8)] |= (1 << ((i + 2) % 8));
-        if (coilPtr[3]) response[3 + ((i + 3) / 8)] |= (1 << ((i + 3) % 8));
-        if (coilPtr[4]) response[3 + ((i + 4) / 8)] |= (1 << ((i + 4) % 8));
-        if (coilPtr[5]) response[3 + ((i + 5) / 8)] |= (1 << ((i + 5) % 8));
-        if (coilPtr[6]) response[3 + ((i + 6) / 8)] |= (1 << ((i + 6) % 8));
-        if (coilPtr[7]) response[3 + ((i + 7) / 8)] |= (1 << ((i + 7) % 8));
-        
-        coilPtr += 8;
-        i += 8;
-        remaining -= 8;
-    }
-
-    switch (remaining) {
-        case 7: if (*coilPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
-        case 6: if (*coilPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
-        case 5: if (*coilPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
-        case 4: if (*coilPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
-        case 3: if (*coilPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
-        case 2: if (*coilPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
-        case 1: if (*coilPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
-        case 0: break;
-    }
-
-    sendResponse(response, 3 + byteCount, broadcast);
+    readBits(coils, numCoils_, data, length, broadcast);
 }
 #endif
 
-#if !defined(MODBUS_DISABLE_READ_DISCRETE_INPUTS)
+#ifndef MODBUS_DISABLE_READ_DISCRETE_INPUTS
 void ModbusRTUServer::handleReadDiscreteInputs(uint8_t* data, size_t length, bool broadcast) {
-    if (length != 8) 
-        return;
-
-    uint16_t startAddress = (data[2] << 8) | data[3];
-    uint16_t quantity = (data[4] << 8) | data[5];
-
-    if (quantity < 1 || quantity > 2000 || (startAddress + quantity) > numDiscreteInputs_) {
-        sendException(data[1], 0x02, broadcast);
-        return;
-    }
-
-    uint8_t byteCount = (quantity + 7) >> 3;
-    uint8_t response[BUFFER_SIZE];
-    response[0] = serverId_;
-    response[1] = data[1];
-    response[2] = byteCount;
-
-    std::fill_n(&response[3], byteCount, 0);
-
-    bool* inputPtr = discreteInputs + startAddress;
-    uint16_t remaining = quantity;
-    uint16_t i = 0;
-
-    while (remaining >= 8) {
-        if (inputPtr[0]) response[3 + (i / 8)] |= (1 << (i % 8));
-        if (inputPtr[1]) response[3 + ((i + 1) / 8)] |= (1 << ((i + 1) % 8));
-        if (inputPtr[2]) response[3 + ((i + 2) / 8)] |= (1 << ((i + 2) % 8));
-        if (inputPtr[3]) response[3 + ((i + 3) / 8)] |= (1 << ((i + 3) % 8));
-        if (inputPtr[4]) response[3 + ((i + 4) / 8)] |= (1 << ((i + 4) % 8));
-        if (inputPtr[5]) response[3 + ((i + 5) / 8)] |= (1 << ((i + 5) % 8));
-        if (inputPtr[6]) response[3 + ((i + 6) / 8)] |= (1 << ((i + 6) % 8));
-        if (inputPtr[7]) response[3 + ((i + 7) / 8)] |= (1 << ((i + 7) % 8));
-        
-        inputPtr += 8;
-        i += 8;
-        remaining -= 8;
-    }
-
-    switch (remaining) {
-        case 7: if (*inputPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
-        case 6: if (*inputPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
-        case 5: if (*inputPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
-        case 4: if (*inputPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
-        case 3: if (*inputPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
-        case 2: if (*inputPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
-        case 1: if (*inputPtr++) response[3 + (i / 8)] |= (1 << (i % 8)); i++; [[fallthrough]];
-        case 0: break;
-    }
-
-    sendResponse(response, 3 + byteCount, broadcast);
+    readBits(discreteInputs, numDiscreteInputs_, data, length, broadcast);
 }
 #endif
 
-#if !defined(MODBUS_DISABLE_READ_HOLDING_REGISTERS)
+#ifndef MODBUS_DISABLE_READ_HOLDING_REGISTERS
 void ModbusRTUServer::handleReadHoldingRegisters(uint8_t* data, size_t length, bool broadcast) {
-    if (length != 8) 
-        return;
-
-    uint16_t startAddress = (data[2] << 8) | data[3];
-    uint16_t quantity = (data[4] << 8) | data[5];
-
-    if (quantity < 1 || quantity > 125 || (startAddress + quantity) > numHoldingRegisters_) {
-        sendException(data[1], 0x02, broadcast);
-        return;
-    }
-
-    uint8_t byteCount = quantity * 2;
-    uint8_t response[BUFFER_SIZE];
-    response[0] = serverId_;
-    response[1] = data[1];
-    response[2] = byteCount;
-
-    if ((size_t)(3 + byteCount + 2) > BUFFER_SIZE) {
-        sendException(data[1], 0x03, broadcast);
-        return;
-    }
-
-    uint16_t* regPtr = holdingRegisters + startAddress;
-    uint8_t* respPtr = response + 3;
-    uint16_t remaining = quantity;
-
-    while (remaining >= 8) {
-        respPtr[0]  = regPtr[0] >> 8; respPtr[1]  = regPtr[0] & 0xFF;
-        respPtr[2]  = regPtr[1] >> 8; respPtr[3]  = regPtr[1] & 0xFF;
-        respPtr[4]  = regPtr[2] >> 8; respPtr[5]  = regPtr[2] & 0xFF;
-        respPtr[6]  = regPtr[3] >> 8; respPtr[7]  = regPtr[3] & 0xFF;
-        respPtr[8]  = regPtr[4] >> 8; respPtr[9]  = regPtr[4] & 0xFF;
-        respPtr[10] = regPtr[5] >> 8; respPtr[11] = regPtr[5] & 0xFF;
-        respPtr[12] = regPtr[6] >> 8; respPtr[13] = regPtr[6] & 0xFF;
-        respPtr[14] = regPtr[7] >> 8; respPtr[15] = regPtr[7] & 0xFF;
-        
-        regPtr += 8;
-        respPtr += 16;
-        remaining -= 8;
-    }
-
-    switch (remaining) {
-        case 7: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
-        case 6: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
-        case 5: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
-        case 4: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
-        case 3: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
-        case 2: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
-        case 1: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
-        case 0: break;
-    }
-
-    sendResponse(response, 3 + byteCount, broadcast);
+    readRegisters(holdingRegisters, numHoldingRegisters_, data, length, broadcast);
 }
 #endif
 
-#if !defined(MODBUS_DISABLE_READ_INPUT_REGISTERS)
+#ifndef MODBUS_DISABLE_READ_INPUT_REGISTERS
 void ModbusRTUServer::handleReadInputRegisters(uint8_t* data, size_t length, bool broadcast) {
-    if (length != 8) 
-        return;
-
-    uint16_t startAddress = (data[2] << 8) | data[3];
-    uint16_t quantity = (data[4] << 8) | data[5];
-
-    if (quantity < 1 || quantity > 125 || (startAddress + quantity) > numInputRegisters_) {
-        sendException(data[1], 0x02, broadcast);
-        return;
-    }
-
-    uint8_t byteCount = quantity * 2;
-    uint8_t response[BUFFER_SIZE];
-    response[0] = serverId_;
-    response[1] = data[1];
-    response[2] = byteCount;
-
-    uint16_t* regPtr = inputRegisters + startAddress;
-    uint8_t* respPtr = response + 3;
-    uint16_t remaining = quantity;
-
-    while (remaining >= 8) {
-        respPtr[0]  = regPtr[0] >> 8; respPtr[1]  = regPtr[0] & 0xFF;
-        respPtr[2]  = regPtr[1] >> 8; respPtr[3]  = regPtr[1] & 0xFF;
-        respPtr[4]  = regPtr[2] >> 8; respPtr[5]  = regPtr[2] & 0xFF;
-        respPtr[6]  = regPtr[3] >> 8; respPtr[7]  = regPtr[3] & 0xFF;
-        respPtr[8]  = regPtr[4] >> 8; respPtr[9]  = regPtr[4] & 0xFF;
-        respPtr[10] = regPtr[5] >> 8; respPtr[11] = regPtr[5] & 0xFF;
-        respPtr[12] = regPtr[6] >> 8; respPtr[13] = regPtr[6] & 0xFF;
-        respPtr[14] = regPtr[7] >> 8; respPtr[15] = regPtr[7] & 0xFF;
-        
-        regPtr += 8;
-        respPtr += 16;
-        remaining -= 8;
-    }
-
-    switch (remaining) {
-        case 7: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
-        case 6: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
-        case 5: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
-        case 4: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
-        case 3: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
-        case 2: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
-        case 1: *respPtr++ = (*regPtr >> 8); *respPtr++ = (*regPtr++ & 0xFF); [[fallthrough]];
-        case 0: break;
-    }
-
-    sendResponse(response, 3 + byteCount, broadcast);
+    readRegisters(inputRegisters, numInputRegisters_, data, length, broadcast);
 }
 #endif
 
-#if !defined(MODBUS_DISABLE_REPORT_SERVER_ID)
+#ifndef MODBUS_DISABLE_REPORT_SERVER_ID
 void ModbusRTUServer::handleReportServerID(uint8_t*, size_t, bool broadcast) {
-    uint8_t response[7];
-    response[0] = serverId_;
-    response[1] = 0x11;
-    response[2] = 4;
-    response[3] = 1;
-    response[4] = 0;
-    response[5] = 0;
-    response[6] = 0;
-
+    // Four bytes of our own: a server ID of 1, the run indicator on, and two of nothing
+    uint8_t response[9] = {serverId_, REPORT_SERVER_ID, 4, 1, 0xFF, 0, 0};
     sendResponse(response, 7, broadcast);
 }
 #endif
 
-#if !defined(MODBUS_DISABLE_WRITE_SINGLE_COIL)
+#ifndef MODBUS_DISABLE_WRITE_SINGLE_COIL
 void ModbusRTUServer::handleWriteSingleCoil(uint8_t* data, size_t length, bool broadcast) {
-    if (length != 8) 
+    if (length != 8)
         return;
 
-    uint16_t coilAddress = (data[2] << 8) | data[3];
+    uint16_t address = (data[2] << 8) | data[3];
     uint16_t value = (data[4] << 8) | data[5];
 
-    if (coilAddress >= numCoils_ || (value != 0xFF00 && value != 0x0000)) {
-        sendException(data[1], 0x03, broadcast);
+    if (value != 0xFF00 && value != 0x0000) {
+        sendException(data[1], ILLEGAL_DATA_VALUE, broadcast);
+        return;
+    }
+    if (address >= numCoils_) {
+        sendException(data[1], ILLEGAL_DATA_ADDRESS, broadcast);
         return;
     }
 
-    coils[coilAddress] = (value == 0xFF00);
+    coils[address] = value == 0xFF00;
 
     sendResponse(data, 6, broadcast);
 }
 #endif
 
-#if !defined(MODBUS_DISABLE_WRITE_SINGLE_REGISTER)
+#ifndef MODBUS_DISABLE_WRITE_SINGLE_REGISTER
 void ModbusRTUServer::handleWriteSingleRegister(uint8_t* data, size_t length, bool broadcast) {
-    if (length != 8) 
+    if (length != 8)
         return;
 
-    uint16_t regAddress = (data[2] << 8) | data[3];
+    uint16_t address = (data[2] << 8) | data[3];
     uint16_t value = (data[4] << 8) | data[5];
 
-    if (regAddress >= numHoldingRegisters_) {
-        sendException(data[1], 0x02, broadcast);
+    if (address >= numHoldingRegisters_) {
+        sendException(data[1], ILLEGAL_DATA_ADDRESS, broadcast);
         return;
     }
 
-    holdingRegisters[regAddress] = value;
+    holdingRegisters[address] = value;
 
     sendResponse(data, 6, broadcast);
 }
 #endif
 
-#if !defined(MODBUS_DISABLE_WRITE_MULTIPLE_COILS)
+#ifndef MODBUS_DISABLE_WRITE_MULTIPLE_COILS
 void ModbusRTUServer::handleWriteMultipleCoils(uint8_t* data, size_t length, bool broadcast) {
-    if (length < 7) 
+    if (length < 7)
         return;
 
-    uint16_t startAddress = (data[2] << 8) | data[3];
+    uint16_t start = (data[2] << 8) | data[3];
     uint16_t quantity = (data[4] << 8) | data[5];
     uint8_t byteCount = data[6];
-    uint8_t expectedByteCount = (quantity + 7) / 8;
 
-    if (quantity < 1 || quantity > 0x07B0 ||
-        (startAddress + quantity) > numCoils_ ||
-        length < (size_t)(7 + byteCount) ||
-        byteCount != expectedByteCount) {
-        sendException(data[1], 0x02, broadcast);
+    if (quantity < 1 || quantity > MAX_WRITE_BITS || byteCount != (quantity + 7) / 8 ||
+        length < 7 + (size_t) byteCount) {
+        sendException(data[1], ILLEGAL_DATA_VALUE, broadcast);
+        return;
+    }
+    if ((size_t) start + quantity > numCoils_) {
+        sendException(data[1], ILLEGAL_DATA_ADDRESS, broadcast);
         return;
     }
 
-    uint8_t* dataPtr = data + 7;
-    bool* coilPtr = coils + startAddress;
-    uint16_t remaining = quantity;
-    uint16_t i = 0;
-
-    while (remaining >= 8) {
-        coilPtr[0] = (dataPtr[i / 8] >> (i % 8)) & 0x01;
-        coilPtr[1] = (dataPtr[(i + 1) / 8] >> ((i + 1) % 8)) & 0x01;
-        coilPtr[2] = (dataPtr[(i + 2) / 8] >> ((i + 2) % 8)) & 0x01;
-        coilPtr[3] = (dataPtr[(i + 3) / 8] >> ((i + 3) % 8)) & 0x01;
-        coilPtr[4] = (dataPtr[(i + 4) / 8] >> ((i + 4) % 8)) & 0x01;
-        coilPtr[5] = (dataPtr[(i + 5) / 8] >> ((i + 5) % 8)) & 0x01;
-        coilPtr[6] = (dataPtr[(i + 6) / 8] >> ((i + 6) % 8)) & 0x01;
-        coilPtr[7] = (dataPtr[(i + 7) / 8] >> ((i + 7) % 8)) & 0x01;
-        
-        coilPtr += 8;
-        i += 8;
-        remaining -= 8;
-    }
-
-    switch (remaining) {
-        case 7: *coilPtr++ = (dataPtr[i / 8] >> (i % 8)) & 0x01; i++; [[fallthrough]];
-        case 6: *coilPtr++ = (dataPtr[i / 8] >> (i % 8)) & 0x01; i++; [[fallthrough]];
-        case 5: *coilPtr++ = (dataPtr[i / 8] >> (i % 8)) & 0x01; i++; [[fallthrough]];
-        case 4: *coilPtr++ = (dataPtr[i / 8] >> (i % 8)) & 0x01; i++; [[fallthrough]];
-        case 3: *coilPtr++ = (dataPtr[i / 8] >> (i % 8)) & 0x01; i++; [[fallthrough]];
-        case 2: *coilPtr++ = (dataPtr[i / 8] >> (i % 8)) & 0x01; i++; [[fallthrough]];
-        case 1: *coilPtr++ = (dataPtr[i / 8] >> (i % 8)) & 0x01; i++; [[fallthrough]];
-        case 0: break;
-    }
+    for (uint16_t i = 0; i < quantity; i++)
+        coils[start + i] = (data[7 + i / 8] >> (i % 8)) & 1;
 
     sendResponse(data, 6, broadcast);
 }
 #endif
 
-#if !defined(MODBUS_DISABLE_WRITE_MULTIPLE_REGISTERS)
+#ifndef MODBUS_DISABLE_WRITE_MULTIPLE_REGISTERS
 void ModbusRTUServer::handleWriteMultipleRegisters(uint8_t* data, size_t length, bool broadcast) {
-    if (length < 7) 
+    if (length < 7)
         return;
 
-    uint16_t startAddress = (data[2] << 8) | data[3];
+    uint16_t start = (data[2] << 8) | data[3];
     uint16_t quantity = (data[4] << 8) | data[5];
     uint8_t byteCount = data[6];
-    uint8_t expectedByteCount = quantity * 2;
 
-    if (quantity < 1 || quantity > 123 ||
-        (startAddress + quantity) > numHoldingRegisters_ ||
-        length < (size_t)(7 + byteCount) ||
-        byteCount != expectedByteCount) {
-        sendException(data[1], 0x02, broadcast);
+    if (quantity < 1 || quantity > MAX_WRITE_REGISTERS || byteCount != quantity * 2 ||
+        length < 7 + (size_t) byteCount) {
+        sendException(data[1], ILLEGAL_DATA_VALUE, broadcast);
+        return;
+    }
+    if ((size_t) start + quantity > numHoldingRegisters_) {
+        sendException(data[1], ILLEGAL_DATA_ADDRESS, broadcast);
         return;
     }
 
-    uint8_t* dataPtr = data + 7;
-    uint16_t* regPtr = holdingRegisters + startAddress;
-    uint16_t remaining = quantity;
-
-    while (remaining >= 8) {
-        regPtr[0] = (dataPtr[0] << 8) | dataPtr[1];
-        regPtr[1] = (dataPtr[2] << 8) | dataPtr[3];
-        regPtr[2] = (dataPtr[4] << 8) | dataPtr[5];
-        regPtr[3] = (dataPtr[6] << 8) | dataPtr[7];
-        regPtr[4] = (dataPtr[8] << 8) | dataPtr[9];
-        regPtr[5] = (dataPtr[10] << 8) | dataPtr[11];
-        regPtr[6] = (dataPtr[12] << 8) | dataPtr[13];
-        regPtr[7] = (dataPtr[14] << 8) | dataPtr[15];
-        
-        regPtr += 8;
-        dataPtr += 16;
-        remaining -= 8;
-    }
-
-    switch (remaining) {
-        case 7: *regPtr++ = (*dataPtr << 8) | *(dataPtr + 1); dataPtr += 2; [[fallthrough]];
-        case 6: *regPtr++ = (*dataPtr << 8) | *(dataPtr + 1); dataPtr += 2; [[fallthrough]];
-        case 5: *regPtr++ = (*dataPtr << 8) | *(dataPtr + 1); dataPtr += 2; [[fallthrough]];
-        case 4: *regPtr++ = (*dataPtr << 8) | *(dataPtr + 1); dataPtr += 2; [[fallthrough]];
-        case 3: *regPtr++ = (*dataPtr << 8) | *(dataPtr + 1); dataPtr += 2; [[fallthrough]];
-        case 2: *regPtr++ = (*dataPtr << 8) | *(dataPtr + 1); dataPtr += 2; [[fallthrough]];
-        case 1: *regPtr++ = (*dataPtr << 8) | *(dataPtr + 1); dataPtr += 2; [[fallthrough]];
-        case 0: break;
-    }
+    for (uint16_t i = 0; i < quantity; i++)
+        holdingRegisters[start + i] = (data[7 + 2 * i] << 8) | data[8 + 2 * i];
 
     sendResponse(data, 6, broadcast);
 }
@@ -948,12 +647,9 @@ void ModbusRTUServer::handleWriteMultipleRegisters(uint8_t* data, size_t length,
 // ------------------------------------------------------------------
 // Public Accessors for Data
 // ------------------------------------------------------------------
-#if !defined(MODBUS_DISABLE_READ_COILS) || !defined(MODBUS_DISABLE_WRITE_SINGLE_COIL) || !defined(MODBUS_DISABLE_WRITE_MULTIPLE_COILS)
+#ifdef MODBUS_HAS_COILS
 bool ModbusRTUServer::getCoil(uint16_t index) const {
-    if (index >= numCoils_ || !coils)
-        return false;
-
-    return coils[index];
+    return index < numCoils_ && coils ? coils[index] : false;
 }
 
 void ModbusRTUServer::setCoil(uint16_t index, bool value) {
@@ -962,12 +658,9 @@ void ModbusRTUServer::setCoil(uint16_t index, bool value) {
 }
 #endif
 
-#if !defined(MODBUS_DISABLE_READ_HOLDING_REGISTERS) || !defined(MODBUS_DISABLE_WRITE_SINGLE_REGISTER) || !defined(MODBUS_DISABLE_WRITE_MULTIPLE_REGISTERS)
+#ifdef MODBUS_HAS_HOLDING_REGISTERS
 uint16_t ModbusRTUServer::getHoldingRegister(uint16_t index) const {
-    if (index >= numHoldingRegisters_ || !holdingRegisters)
-        return 0;
-
-    return holdingRegisters[index];
+    return index < numHoldingRegisters_ && holdingRegisters ? holdingRegisters[index] : 0;
 }
 
 void ModbusRTUServer::setHoldingRegister(uint16_t index, uint16_t value) {
@@ -976,12 +669,9 @@ void ModbusRTUServer::setHoldingRegister(uint16_t index, uint16_t value) {
 }
 #endif
 
-#if !defined(MODBUS_DISABLE_READ_DISCRETE_INPUTS)
+#ifdef MODBUS_HAS_DISCRETE_INPUTS
 bool ModbusRTUServer::getDiscreteInput(uint16_t index) const {
-    if (index >= numDiscreteInputs_ || !discreteInputs)
-        return false;
-
-    return discreteInputs[index];
+    return index < numDiscreteInputs_ && discreteInputs ? discreteInputs[index] : false;
 }
 
 void ModbusRTUServer::setDiscreteInput(uint16_t index, bool value) {
@@ -990,12 +680,9 @@ void ModbusRTUServer::setDiscreteInput(uint16_t index, bool value) {
 }
 #endif
 
-#if !defined(MODBUS_DISABLE_READ_INPUT_REGISTERS)
+#ifdef MODBUS_HAS_INPUT_REGISTERS
 uint16_t ModbusRTUServer::getInputRegister(uint16_t index) const {
-    if (index >= numInputRegisters_ || !inputRegisters)
-        return 0;
-
-    return inputRegisters[index];
+    return index < numInputRegisters_ && inputRegisters ? inputRegisters[index] : 0;
 }
 
 void ModbusRTUServer::setInputRegister(uint16_t index, uint16_t value) {
