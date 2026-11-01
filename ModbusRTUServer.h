@@ -174,8 +174,9 @@ public:
     bool checkCrc(const uint8_t* data, size_t length);
 
     // Validate and dispatch a single, already-delimited frame (CRC, server-id and function-code routing).
-    // Intended to be called from an onRawBuffer handler.
-    void processFrame(uint8_t* data, size_t length);
+    // Intended to be called from an onRawBuffer handler. crcChecked skips the CRC, for a handler that found the
+    // frame's end with checkCrc() already.
+    void processFrame(uint8_t* data, size_t length, bool crcChecked = false);
 
     // ------------------------------------------------------------------
     // Public Accessors for Data
@@ -222,7 +223,7 @@ private:
 
     static const size_t MAX_FRAME = 256;   // a Modbus RTU frame, CRC and all
     static const size_t BUFFER_SIZE = 512; // what gathers before custom framing has to take some
-    static const size_t READ_CHUNK = 64;   // a port read at a time, off the stack
+    static const size_t READ_CHUNK = 64;   // a port read at a time while filtering an echo, off the stack
     uint8_t buffer_[BUFFER_SIZE];
     size_t bufferIndex_ = 0;
     uint32_t lastByteTime_ = 0;
