@@ -207,15 +207,23 @@ void ModbusRTUServer::update() {
     // Read at most what the buffer has room for, less the bytes held back as a possible echo, which go in first
     // if it turns out not to be one. With custom framing a full buffer goes to the handler for room; without it
     // the rest stays in the port until the frame is processed.
-    uint8_t chunk[READ_CHUNK];
-    size_t n;
-    while (room() > 0 && (n = port_->read(chunk, std::min(sizeof chunk, room()))) > 0) {
-        lastByteTime_ = nowUs();
-
-        for (size_t i = 0; i < n; i++) {
-            if (!filterEcho(chunk[i]))
-                storeByte(chunk[i]);
+    // Straight into the buffer unless we're waiting for an echo, then a chunk at a time through the filter.
+    while (room() > 0) {
+        size_t n;
+        if (echoLength_ == 0) {
+            n = port_->read(buffer_ + bufferIndex_, room());
+            bufferIndex_ += n;
+        } else {
+            uint8_t chunk[READ_CHUNK];
+            n = port_->read(chunk, std::min(sizeof chunk, room()));
+            for (size_t i = 0; i < n; i++) {
+                if (!filterEcho(chunk[i]))
+                    storeByte(chunk[i]);
+            }
         }
+        if (n == 0)
+            break;
+        lastByteTime_ = nowUs();
 
         if (room() == 0 && onRawBuffer)
             handOver();
@@ -395,7 +403,7 @@ bool ModbusRTUServer::checkCrc(const uint8_t* data, size_t length) {
     return computeCrc(data, length) == 0;
 }
 
-void ModbusRTUServer::processFrame(uint8_t* data, size_t length) {
+void ModbusRTUServer::processFrame(uint8_t* data, size_t length, bool crcChecked) {
     if (length < 4)
         return;
 
@@ -407,7 +415,7 @@ void ModbusRTUServer::processFrame(uint8_t* data, size_t length) {
         return;
     }
 
-    if (computeCrc(data, length) != 0) {
+    if (!crcChecked && computeCrc(data, length) != 0) {
         if (onInvalidCrc)
             onInvalidCrc(data, length, broadcast);
         return;
